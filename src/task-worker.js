@@ -168,8 +168,7 @@ class TaskWorker {
         
         this.activeTasks.set(task.taskId, task);
         
-        // Use node-specific work directory
-        const taskWorkDir = path.join(this.workDir, 'active', this.nodeId + '_' + task.taskId);
+        const taskWorkDir = path.join(this.workDir, task.taskId);
         await fs.mkdir(taskWorkDir, { recursive: true });
 
         console.log('🔨 Starting work on:', task.description, '...');
@@ -193,7 +192,7 @@ class TaskWorker {
 
         try {
             // Spawn OpenClaw sub-agent using CLI
-            const result = await this.spawnOpenClawAgent(task, instruction, workDir);
+            const result = await this.spawnOpenClawAgent(task, workDir);
             
             if (result.success) {
                 console.log('✅ Sub-agent completed task successfully');
@@ -204,13 +203,16 @@ class TaskWorker {
             }
         } catch (error) {
             console.error('❌ Failed to spawn sub-agent:', error.message);
-            // Fallback to local generation
-            console.log('⚠️ Falling back to local generator...');
-            const result = await this.executeLocalTask(task, workDir);
-            if (result.success) {
-                await this.completeTask(task.taskId, result, workDir);
+            if (process.env.OPENCLAW_FALLBACK === '1') {
+                console.log('⚠️ Falling back to local generator...');
+                const result = await this.executeLocalTask(task, workDir);
+                if (result.success) {
+                    await this.completeTask(task.taskId, result, workDir);
+                } else {
+                    await this.failTask(task.taskId, result.error);
+                }
             } else {
-                await this.failTask(task.taskId, result.error);
+                await this.failTask(task.taskId, error.message);
             }
         }
     }
@@ -251,12 +253,8 @@ Start working now and save all files to the specified directory.
     }
 
     // Spawn OpenClaw as a sub-agent to process the task
-    async spawnOpenClawAgent(task, instruction, workDir) {
-        return new Promise((resolve, reject) => {
-            // Method 1: Try using openclaw sessions spawn via CLI
-            // This creates a new isolated session for the task
-            
-            const taskPrompt = `Complete the following task and save all output files to ${workDir}:
+    async spawnOpenClawAgent(task, workDir) {
+        const taskPrompt = `Complete the following task and save all output files to ${workDir}:
 
 Task: ${task.description}
 
@@ -265,49 +263,41 @@ Requirements:
 2. Save all files to: ${workDir}
 3. Include README.md with instructions
 4. Make it professional and polished
-
+5. Based on the Task: <The user's requirements>. Analyze automatic expansion and understand the requirements. There is no need to ask me about other functional requirements. Just write the code or document directly.
 Work directory: ${workDir}
 
 Generate the solution now.`;
 
-            // Write the prompt to a file that OpenClaw can read
-            const promptFile = path.join(workDir, 'openclaw-prompt.txt');
-            fs.writeFile(promptFile, taskPrompt).then(() => {
-                // For now, simulate OpenClaw processing by reading the prompt
-                // In a full implementation, this would call the actual OpenClaw API
-                console.log('🧠 OpenClaw sub-agent processing task...');
-                console.log('   Work directory:', workDir);
-                
-                // Simulate processing delay
-                setTimeout(async () => {
-                    try {
-                        // Generate output based on task type
-                        await this.generateOutputForTask(task, workDir);
-                        
-                        // Read generated files
-                        const files = await fs.readdir(workDir);
-                        const outputFiles = [];
-                        
-                        for (const file of files) {
-                            if (!file.endsWith('.zip') && file !== 'prompt.txt') {
-                                const stat = await fs.stat(path.join(workDir, file));
-                                outputFiles.push({ name: file, size: stat.size });
-                            }
-                        }
-                        
-                        resolve({
-                            success: true,
-                            outputFiles,
-                            processingTime: 30000,
-                            completedAt: Date.now(),
-                            source: 'openclaw-subagent'
-                        });
-                    } catch (err) {
-                        reject(err);
-                    }
-                }, 5000); // 5 second simulated processing
-            }).catch(reject);
+        const promptFile = path.join(workDir, 'openclaw-prompt.txt');
+        await fs.writeFile(promptFile, taskPrompt);
+
+        const openclawBin = process.env.OPENCLAW_BIN || 'openclaw';
+        // const responseInstruction = `Please reply with JSON only and include TASK_ID ${task.taskId}: {"taskId":"${task.taskId}","files":[{"name":"index.html","content":"..."},{"name":"README.md","content":"..."}],"note":"optional"}.`;
+        // const messageText = `TASK_ID: ${task.taskId}\nWORK_DIR: ${workDir}\n${taskPrompt}\n不需要提问我其它功能需求，自动扩展和理解需求，直接编写代码或者文档，并将生成的文件保存到：${workDir}\n${responseInstruction}`;
+        const messageText = `${taskPrompt}`
+        const agentId = process.env.OPENCLAW_AGENT_ID || 'main';
+        const agentArgs = ['agent', '--message', messageText, '--agent', agentId];
+        console.log('🧠 OpenClaw sub-agent processing task...');
+        console.log('   Work directory:', workDir);
+        console.log('   Command:', [openclawBin, ...agentArgs].join(' '));
+        let waitingLogged = false;
+        const raw = await this.runOpenClawCommand(openclawBin, agentArgs, workDir, (text) => {
+            if (waitingLogged) return;
+            if (text.includes('Waiting for agent reply')) {
+                waitingLogged = true;
+                fs.writeFile(path.join(workDir, 'STATUS.txt'), 'WAITING: Waiting for agent reply\nUpdated: ' + new Date().toISOString()).catch(() => {});
+            }
         });
+        const payload = this.extractOpenClawResponsePayload(raw);
+        const outputFiles = await this.writePayloadFiles(workDir, payload || raw);
+        await this.finalizeOutput(task, workDir, outputFiles);
+        return {
+            success: true,
+            outputFiles,
+            processingTime: 30000,
+            completedAt: Date.now(),
+            source: 'openclaw-subagent'
+        };
     }
 
     // Generate appropriate output based on task description
@@ -345,28 +335,7 @@ Generate the solution now.`;
                 }
             }
             
-            const manifest = {
-                taskId: task.taskId,
-                description: task.description,
-                completedAt: new Date().toISOString(),
-                outputFiles,
-                processedBy: 'OpenClaw Sub-Agent',
-                nodeId: this.mesh?.nodeId
-            };
-            
-            await fs.writeFile(
-                path.join(workDir, 'manifest.json'),
-                JSON.stringify(manifest, null, 2)
-            );
-            
-            // Update status
-            await fs.writeFile(
-                path.join(workDir, 'STATUS.txt'),
-                'COMPLETED: Task finished by OpenClaw sub-agent\nCompleted: ' + new Date().toISOString()
-            );
-            
-            // Create download package
-            await this.createDownloadPackage(task.taskId, workDir);
+            await this.finalizeOutput(task, workDir, outputFiles);
             
         } catch (error) {
             console.error('   Error in generateOutputForTask:', error.message);
@@ -519,6 +488,250 @@ All required outputs have been generated and validated.
 *Processed by OpenClaw Mesh Task Worker*`;
         
         await fs.writeFile(path.join(workDir, 'SOLUTION.md'), doc);
+    }
+
+    extractOpenClawResponseText(stdoutBuffer) {
+        if (!stdoutBuffer) return null;
+        const start = stdoutBuffer.lastIndexOf('{');
+        if (start < 0) return null;
+        const jsonText = stdoutBuffer.slice(start);
+        try {
+            const parsed = JSON.parse(jsonText);
+            if (typeof parsed === 'string') return parsed;
+            if (parsed.message) return parsed.message;
+            if (parsed.response) return parsed.response;
+            if (parsed.text) return parsed.text;
+            if (parsed.content && typeof parsed.content === 'string') return parsed.content;
+            if (Array.isArray(parsed.payloads)) {
+                const parts = parsed.payloads.map(p => {
+                    if (!p) return '';
+                    if (typeof p === 'string') return p;
+                    if (p.message) return p.message;
+                    if (p.text) return p.text;
+                    if (p.content && typeof p.content === 'string') return p.content;
+                    if (p.content && p.content.text) return p.content.text;
+                    return '';
+                }).filter(Boolean);
+                if (parts.length > 0) return parts.join('\n');
+            }
+        } catch (e) {
+            return null;
+        }
+        return null;
+    }
+
+    async runOpenClawCommand(bin, args, cwd, onStdout) {
+        return new Promise((resolve, reject) => {
+            const child = spawn(bin, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd });
+            let stderr = '';
+            let stdout = '';
+            child.stdout.on('data', (data) => {
+                const text = data.toString();
+                stdout += text;
+                process.stdout.write(data);
+                if (onStdout) {
+                    onStdout(text);
+                }
+            });
+            child.stderr.on('data', (data) => {
+                stderr += data.toString();
+                process.stderr.write(data);
+            });
+            child.on('error', reject);
+            child.on('close', (code) => {
+                if (code !== 0) {
+                    reject(new Error(stderr || `openclaw exited with code ${code}`));
+                    return;
+                }
+                resolve(stdout);
+            });
+        });
+    }
+
+    async waitForChannelResponse(bin, channel, target, account, taskId, workDir) {
+        const timeoutMs = parseInt(process.env.OPENCLAW_REPLY_TIMEOUT_MS || '300000', 10);
+        const intervalMs = parseInt(process.env.OPENCLAW_REPLY_INTERVAL_MS || '5000', 10);
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            const readArgs = ['message', 'read', '--channel', channel, '--target', target, '--limit', '20', '--json'];
+            if (account) {
+                readArgs.push('--account', account);
+            }
+            const raw = await this.runOpenClawCommand(bin, readArgs, workDir);
+            const parsed = this.parseJsonSafe(raw);
+            const messages = this.normalizeMessages(parsed);
+            for (const msg of messages) {
+                const text = this.getMessageText(msg);
+                const payload = this.extractOpenClawResponsePayload(text);
+                const payloadTaskId = payload && (payload.taskId || payload.task_id);
+                const hasTaskId = (text && text.includes(`TASK_ID: ${taskId}`)) || payloadTaskId === taskId;
+                if (!hasTaskId) continue;
+                if (!payload) continue;
+                const outputFiles = await this.writePayloadFiles(workDir, payload);
+                return outputFiles;
+            }
+            await new Promise(resolve => setTimeout(resolve, intervalMs));
+        }
+        throw new Error('Timeout waiting for OpenClaw channel response.');
+    }
+
+    parseJsonSafe(raw) {
+        try {
+            return JSON.parse(raw);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    normalizeMessages(parsed) {
+        if (!parsed) return [];
+        if (Array.isArray(parsed)) return parsed;
+        if (Array.isArray(parsed.messages)) return parsed.messages;
+        if (Array.isArray(parsed.items)) return parsed.items;
+        if (Array.isArray(parsed.data)) return parsed.data;
+        if (Array.isArray(parsed.payloads)) return parsed.payloads;
+        if (Array.isArray(parsed.results)) return parsed.results;
+        if (Array.isArray(parsed.events)) return parsed.events;
+        return [];
+    }
+
+    getMessageText(msg) {
+        if (!msg) return '';
+        if (typeof msg === 'string') return msg;
+        if (msg.message) return msg.message;
+        if (msg.text) return msg.text;
+        if (msg.body) return msg.body;
+        if (msg.content && typeof msg.content === 'string') return msg.content;
+        if (msg.content && msg.content.text) return msg.content.text;
+        if (msg.payload && msg.payload.text) return msg.payload.text;
+        return '';
+    }
+
+    extractOpenClawResponsePayload(text) {
+        if (!text) return null;
+        const fenceMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+        const candidates = [text.trim()];
+        if (fenceMatch && fenceMatch[1]) {
+            candidates.unshift(fenceMatch[1].trim());
+        }
+        for (const candidate of candidates) {
+            const parsed = this.parseJsonSafe(candidate);
+            if (parsed) return parsed;
+            const start = candidate.indexOf('{');
+            const end = candidate.lastIndexOf('}');
+            if (start >= 0 && end > start) {
+                const sliced = candidate.slice(start, end + 1);
+                const slicedParsed = this.parseJsonSafe(sliced);
+                if (slicedParsed) return slicedParsed;
+            }
+        }
+        return null;
+    }
+
+    async resolveChatChannelTarget(bin, cwd) {
+        const channelsRaw = await this.runOpenClawCommand(bin, ['channels', 'list', '--json'], cwd);
+        const channelsParsed = this.parseJsonSafe(channelsRaw);
+        const channelEntry = this.findChannelEntry(channelsParsed);
+        if (!channelEntry || !channelEntry.channel) {
+            return null;
+        }
+        const channel = channelEntry.channel;
+        const account = channelEntry.accountId || channelEntry.account || channelEntry.account_id;
+        const selfTarget = await this.resolveSelfTarget(bin, cwd, channel, account);
+        if (!selfTarget) return null;
+        return {
+            channel,
+            target: selfTarget,
+            account
+        };
+    }
+
+    findChannelEntry(parsed) {
+        if (!parsed) return null;
+        const queue = [parsed];
+        while (queue.length > 0) {
+            const current = queue.shift();
+            if (!current || typeof current !== 'object') continue;
+            const channel = current.channel || current.provider;
+            const accountId = current.accountId || current.account_id || current.account;
+            if (channel) {
+                return { channel, accountId };
+            }
+            for (const value of Object.values(current)) {
+                if (value && typeof value === 'object') {
+                    queue.push(value);
+                }
+            }
+        }
+        return null;
+    }
+
+    async resolveSelfTarget(bin, cwd, channel, account) {
+        const args = ['directory', 'self', '--channel', channel, '--json'];
+        if (account) {
+            args.push('--account', account);
+        }
+        const raw = await this.runOpenClawCommand(bin, args, cwd);
+        const parsed = this.parseJsonSafe(raw);
+        if (!parsed) return null;
+        const openId = parsed.openId || parsed.open_id;
+        const userId = parsed.userId || parsed.user_id || parsed.id;
+        if (openId) return `user:${openId}`;
+        if (userId) return `user:${userId}`;
+        if (parsed.chatId || parsed.chat_id) return `chat:${parsed.chatId || parsed.chat_id}`;
+        return null;
+    }
+
+    async writePayloadFiles(workDir, payload) {
+        const outputFiles = [];
+        if (payload && Array.isArray(payload.files)) {
+            for (const file of payload.files) {
+                if (!file || !file.name || typeof file.content !== 'string') continue;
+                const filePath = path.join(workDir, file.name);
+                await fs.writeFile(filePath, file.content);
+                const stat = await fs.stat(filePath);
+                outputFiles.push({ name: file.name, size: stat.size });
+            }
+        }
+        if (outputFiles.length === 0) {
+            const body = typeof payload === 'string' ? payload : JSON.stringify(payload || {}, null, 2);
+            const responsePath = path.join(workDir, 'openclaw-response.json');
+            await fs.writeFile(responsePath, body);
+            await fs.writeFile(path.join(workDir, 'SOLUTION.md'), body);
+            await fs.writeFile(path.join(workDir, 'README.md'), 'OpenClaw agent output saved in SOLUTION.md');
+            const responseStat = await fs.stat(responsePath);
+            const solutionStat = await fs.stat(path.join(workDir, 'SOLUTION.md'));
+            const readmeStat = await fs.stat(path.join(workDir, 'README.md'));
+            outputFiles.push(
+                { name: 'openclaw-response.json', size: responseStat.size },
+                { name: 'SOLUTION.md', size: solutionStat.size },
+                { name: 'README.md', size: readmeStat.size }
+            );
+        }
+        return outputFiles;
+    }
+
+    async finalizeOutput(task, workDir, outputFiles) {
+        const manifest = {
+            taskId: task.taskId,
+            description: task.description,
+            completedAt: new Date().toISOString(),
+            outputFiles,
+            processedBy: 'OpenClaw Sub-Agent',
+            nodeId: this.mesh?.nodeId
+        };
+        
+        await fs.writeFile(
+            path.join(workDir, 'manifest.json'),
+            JSON.stringify(manifest, null, 2)
+        );
+        
+        await fs.writeFile(
+            path.join(workDir, 'STATUS.txt'),
+            'COMPLETED: Task finished by OpenClaw sub-agent\nCompleted: ' + new Date().toISOString()
+        );
+        
+        await this.createDownloadPackage(task.taskId, workDir);
     }
 
     async createDownloadPackage(taskId, workDir) {

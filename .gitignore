@@ -3,3 +3,4 @@ data*
 node_modules
 task-workspace
 package-lock.json
+**.DS_Store
