@@ -142,6 +142,8 @@ class WebUIServer {
                 } catch (e) {
                     data = { error: e.message };
                 }
+                res.writeHead(200);
+                res.end(JSON.stringify(data));
             });
             return;
         } else if (url === '/api/memory/publish' && req.method === 'POST') {
@@ -163,6 +165,8 @@ class WebUIServer {
                 } catch (e) {
                     data = { error: e.message };
                 }
+                res.writeHead(200);
+                res.end(JSON.stringify(data));
             });
             return;
         }
