@@ -1,0 +1,440 @@
+#!/usr/bin/env node
+/**
+ * OpenClaw Mesh CLI
+ * 命令行接口
+ */
+
+const OpenClawMesh = require('./index');
+const fs = require('fs');
+const path = require('path');
+
+// 默认配置文件路径
+let CONFIG_FILE = path.join(process.env.HOME || process.env.USERPROFILE, '.openclaw-mesh.json');
+
+// 解析命令行参数
+function getArg(args, key, defaultVal = null) {
+    const idx = args.indexOf(key);
+    if (idx >= 0 && idx + 1 < args.length) {
+        return args[idx + 1];
+    }
+    // 支持 --key=value 格式
+    for (const arg of args) {
+        if (arg.startsWith(key + '=')) {
+            return arg.substring(key.length + 1);
+        }
+    }
+    return defaultVal;
+}
+
+// 加载配置
+function loadConfig(configPath = null) {
+    const file = configPath || CONFIG_FILE;
+    if (fs.existsSync(file)) {
+        return JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+    return {};
+}
+
+// 保存配置
+function saveConfig(config) {
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+}
+
+// 显示帮助
+function showHelp() {
+    console.log(`
+OpenClaw Mesh - 去中心化技能共享网络
+
+用法:
+  openclaw-mesh <command> [options]
+
+命令:
+  init [name]          初始化节点
+  start                启动节点
+  stop                 停止节点
+  status               查看节点状态
+  publish <file>       发布记忆胶囊
+  memories [filter]    列出记忆
+  search <query>       搜索记忆
+  task publish         发布任务
+  task list            列出任务
+  task submit <id>     提交解决方案
+  sync                 同步网络记忆
+  webui                打开WebUI
+  config               查看配置
+
+选项:
+  --config <path>      指定配置文件路径
+  --port <number>      设置P2P端口
+  --web-port <number>  设置WebUI端口
+  --bootstrap <addr>   添加引导节点
+  --tags <tags>        设置标签（逗号分隔）
+
+示例:
+  openclaw-mesh init MyNode
+  openclaw-mesh start --port 4001
+  openclaw-mesh start --config ./my-mesh.json
+  openclaw-mesh publish ./skill.json --tags trading,api
+  openclaw-mesh search "JSON parse error"
+  openclaw-mesh task publish --description "优化性能" --bounty 100
+`);
+}
+
+// 初始化节点
+async function init(args) {
+    const name = args[0] || 'MyNode';
+    const nodeId = 'node_' + require('crypto').randomBytes(8).toString('hex');
+    
+    // 解析命令行参数
+    const port = parseInt(getArg(args, '--port')) || 0;
+    const webPort = parseInt(getArg(args, '--web-port')) || 3457;
+    const bootstrap = getArg(args, '--bootstrap');
+    const tags = getArg(args, '--tags', '');
+    
+    const bootstrapNodes = bootstrap ? [bootstrap] : [];
+    const nodeTags = tags ? tags.split(',').map(t => t.trim()) : [];
+    
+    const config = {
+        name,
+        nodeId,
+        port,
+        webPort,
+        bootstrapNodes,
+        tags: nodeTags,
+        dataDir: './data',
+        createdAt: new Date().toISOString()
+    };
+    
+    saveConfig(config);
+    
+    console.log(`✅ Node initialized: ${name}`);
+    console.log(`   Node ID: ${nodeId}`);
+    console.log(`   P2P Port: ${port || '(random)'}`);
+    console.log(`   WebUI Port: ${webPort}`);
+    console.log(`   Config: ${CONFIG_FILE}`);
+}
+
+// 启动节点
+async function start(args, configPath = null) {
+    const config = loadConfig(configPath);
+    
+    const options = {
+        nodeId: config.nodeId,
+        port: getArg(args, '--port') || config.port || 0,
+        webPort: getArg(args, '--web-port') || config.webPort || 3457,
+        bootstrapNodes: config.bootstrapNodes || [],
+        dataDir: config.dataDir || './data'
+    };
+    
+    // 如果有bootstrap参数
+    const bootstrap = getArg(args, '--bootstrap');
+    if (bootstrap) {
+        options.bootstrapNodes.push(bootstrap);
+    }
+    
+    const mesh = new OpenClawMesh(options);
+    await mesh.init();
+    
+    // 保存实例供后续使用
+    global.meshInstance = mesh;
+    
+    // 保持运行
+    console.log('\n⏳ Node is running... Press Ctrl+C to stop\n');
+    
+    process.on('SIGINT', async () => {
+        await mesh.stop();
+        process.exit(0);
+    });
+}
+
+// 查看状态
+async function status(configPath = null) {
+    const config = loadConfig(configPath);
+    
+    if (!global.meshInstance) {
+        console.log('⚠️  Node not running');
+        console.log(`   Node ID: ${config.nodeId || 'Not initialized'}`);
+        return;
+    }
+    
+    const stats = global.meshInstance.getStats();
+    
+    console.log('\n📊 Node Status');
+    console.log('=' .repeat(40));
+    console.log(`Node ID: ${stats.nodeId}`);
+    console.log(`Uptime: ${Math.floor(stats.uptime)}s`);
+    console.log(`Peers: ${stats.peers.length}`);
+    console.log(`Memories: ${stats.memoryCount}`);
+    console.log(`Tasks: ${stats.taskCount}`);
+    console.log(`WebUI: http://localhost:${global.meshInstance.options.webPort}`);
+}
+
+// 发布记忆
+async function publish(args) {
+    const file = args[0];
+    if (!file) {
+        console.error('❌ Please specify a file');
+        return;
+    }
+    
+    if (!fs.existsSync(file)) {
+        console.error(`❌ File not found: ${file}`);
+        return;
+    }
+    
+    const content = fs.readFileSync(file, 'utf8');
+    let capsule;
+    
+    try {
+        capsule = JSON.parse(content);
+    } catch (e) {
+        // 如果不是JSON，作为原始内容处理
+        capsule = {
+            content: {
+                gene: {
+                    trigger: 'manual',
+                    solution: content
+                },
+                capsule: {
+                    type: 'skill',
+                    code: content,
+                    confidence: 0.8
+                }
+            }
+        };
+    }
+    
+    // 添加标签
+    const tags = getArg(args, '--tags');
+    if (tags) {
+        capsule.content.capsule.blast_radius = tags.split(',');
+    }
+    
+    if (!global.meshInstance) {
+        console.error('❌ Node not running. Start with: openclaw-mesh start');
+        return;
+    }
+    
+    const assetId = await global.meshInstance.publishCapsule(capsule);
+    console.log(`✅ Published: ${assetId}`);
+}
+
+// 列出记忆
+async function memories(args) {
+    if (!global.meshInstance) {
+        console.error('❌ Node not running');
+        return;
+    }
+    
+    const filter = {};
+    if (args[0]) {
+        filter.tags = [args[0]];
+    }
+    
+    const capsules = global.meshInstance.memoryStore.queryCapsules(filter);
+    
+    console.log(`\n📦 Memories (${capsules.length} total)`);
+    console.log('=' .repeat(60));
+    
+    capsules.slice(0, 20).forEach((c, i) => {
+        console.log(`\n${i + 1}. ${c.asset_id.slice(0, 20)}...`);
+        console.log(`   Type: ${c.type} | Confidence: ${(c.confidence * 100).toFixed(0)}%`);
+        console.log(`   Creator: ${c.attribution.creator}`);
+        console.log(`   Tags: ${c.tags.join(', ')}`);
+    });
+}
+
+// 搜索记忆
+async function search(args) {
+    const query = args[0];
+    if (!query) {
+        console.error('❌ Please specify a search query');
+        return;
+    }
+    
+    if (!global.meshInstance) {
+        console.error('❌ Node not running');
+        return;
+    }
+    
+    const results = global.meshInstance.memoryStore.searchMemories(query);
+    
+    console.log(`\n🔍 Search: "${query}" (${results.length} results)`);
+    console.log('=' .repeat(60));
+    
+    results.forEach((r, i) => {
+        console.log(`\n${i + 1}. ${r.asset_id.slice(0, 20)}...`);
+        console.log(`   Confidence: ${(r.confidence * 100).toFixed(0)}%`);
+    });
+}
+
+// 任务命令
+async function taskCommand(subcommand, args) {
+    switch (subcommand) {
+        case 'publish':
+            await publishTask(args);
+            break;
+        case 'list':
+            await listTasks();
+            break;
+        case 'submit':
+            await submitSolution(args);
+            break;
+        default:
+            console.log('Usage: openclaw-mesh task <publish|list|submit>');
+    }
+}
+
+async function publishTask(args) {
+    const description = getArg(args, '--description');
+    const bounty = parseInt(getArg(args, '--bounty')) || 100;
+    
+    if (!description) {
+        console.error('❌ Please specify --description');
+        return;
+    }
+    
+    if (!global.meshInstance) {
+        console.error('❌ Node not running');
+        return;
+    }
+    
+    const task = {
+        description,
+        type: 'code',
+        bounty: {
+            amount: bounty,
+            token: 'CLAW'
+        },
+        deadline: new Date(Date.now() + 86400000).toISOString()
+    };
+    
+    const taskId = await global.meshInstance.publishTask(task);
+    console.log(`✅ Task published: ${taskId}`);
+}
+
+async function listTasks() {
+    if (!global.meshInstance) {
+        console.error('❌ Node not running');
+        return;
+    }
+    
+    const tasks = global.meshInstance.taskBazaar.getTasks();
+    
+    console.log(`\n🎯 Tasks (${tasks.length} total)`);
+    console.log('=' .repeat(60));
+    
+    tasks.forEach((t, i) => {
+        console.log(`\n${i + 1}. ${t.taskId}`);
+        console.log(`   ${t.description}`);
+        console.log(`   Status: ${t.status} | Bounty: ${t.bounty.amount} ${t.bounty.token}`);
+    });
+}
+
+async function submitSolution(args) {
+    const taskId = args[0];
+    if (!taskId) {
+        console.error('❌ Please specify task ID');
+        return;
+    }
+    
+    if (!global.meshInstance) {
+        console.error('❌ Node not running');
+        return;
+    }
+    
+    // 这里简化处理，实际应该读取文件或交互输入
+    const solution = {
+        description: 'Solution submitted via CLI',
+        code: '// TODO: Implement solution'
+    };
+    
+    const result = await global.meshInstance.submitSolution(taskId, solution);
+    
+    if (result.success) {
+        console.log(`✅ Solution accepted!`);
+        if (result.winner) {
+            console.log(`🏆 You won the bounty: ${result.reward}`);
+        }
+    } else {
+        console.log(`❌ Solution rejected: ${result.reason}`);
+    }
+}
+
+// 同步记忆
+async function sync(args) {
+    if (!global.meshInstance) {
+        console.error('❌ Node not running');
+        return;
+    }
+    
+    console.log('🔄 Syncing memories from network...');
+    const count = await global.meshInstance.syncMemories();
+    console.log(`✅ Synced ${count} memories`);
+}
+
+// 查看配置
+async function config() {
+    const cfg = loadConfig();
+    console.log('\n⚙️  Configuration');
+    console.log('=' .repeat(40));
+    console.log(JSON.stringify(cfg, null, 2));
+}
+
+// 主函数
+async function main() {
+    const args = process.argv.slice(2);
+    
+    // 解析 --config 选项（必须在所有命令之前处理）
+    const configArg = getArg(args, '--config');
+    if (configArg) {
+        CONFIG_FILE = path.resolve(configArg);
+        console.log(`📄 Using config: ${CONFIG_FILE}`);
+    }
+    
+    const command = args[0];
+    const subArgs = args.slice(1);
+    
+    switch (command) {
+        case 'init':
+            await init(subArgs);
+            break;
+        case 'start':
+            await start(subArgs, configArg);
+            break;
+        case 'stop':
+            console.log('Use Ctrl+C to stop the node');
+            break;
+        case 'status':
+            await status(configArg);
+            break;
+        case 'publish':
+            await publish(subArgs);
+            break;
+        case 'memories':
+            await memories(subArgs);
+            break;
+        case 'search':
+            await search(subArgs);
+            break;
+        case 'task':
+            await taskCommand(subArgs[0], subArgs.slice(1));
+            break;
+        case 'sync':
+            await sync(subArgs);
+            break;
+        case 'config':
+            await config();
+            break;
+        case 'webui':
+            console.log('Open http://localhost:3457 in your browser');
+            break;
+        case 'help':
+        case '-h':
+        case '--help':
+        default:
+            showHelp();
+    }
+}
+
+main().catch(console.error);

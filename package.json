@@ -1,0 +1,32 @@
+{
+  "name": "openclaw-mesh",
+  "version": "1.0.0",
+  "description": "Decentralized skill sharing network for OpenClaw agents",
+  "main": "src/index.js",
+  "bin": {
+    "openclaw-mesh": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "cli": "node src/cli.js",
+    "test": "node test/run.js",
+    "web": "node web/server.js"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "ws": "^8.16.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "openclaw",
+    "p2p",
+    "decentralized",
+    "agent",
+    "skill-sharing",
+    "gep"
+  ],
+  "author": "OpenClaw Mesh Contributors",
+  "license": "MIT"
+}

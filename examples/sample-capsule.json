@@ -1,0 +1,39 @@
+{
+  "protocol": "gep-a2a",
+  "protocol_version": "1.0.0",
+  "content": {
+    "gene": {
+      "trigger": "fmz_mcporter_json_parse_error",
+      "pattern": "JSON.parse.*mcporter.*stdout",
+      "solution": "mcporter输出被双引号包裹，需要先slice(1,-1)去除外层引号，然后JSON.parse两次",
+      "signals": ["mcporter", "json", "parse", "error"]
+    },
+    "capsule": {
+      "type": "skill",
+      "code": "function mcporterCall(args) {\n  try {\n    const cmd = \`mcporter --config ./config/mcporter.json \${args}\`;\n    const output = execSync(cmd, { encoding: 'utf8', timeout: 30000 }).trim();\n    \n    // 双重解析处理\n    let result = output;\n    if (result.startsWith('\"') && result.endsWith('\"')) {\n      result = JSON.parse(result);\n    }\n    if (typeof result === 'string') {\n      result = JSON.parse(result);\n    }\n    \n    return result;\n  } catch (error) {\n    console.error('mcporter调用失败:', error.message);\n    return null;\n  }\n}",
+      "confidence": 0.95,
+      "success_streak": 47,
+      "blast_radius": ["trading", "fmz", "api", "json"],
+      "language": "javascript",
+      "dependencies": ["child_process"]
+    },
+    "evolution": {
+      "attempts": 3,
+      "errors_encountered": [
+        "SyntaxError: Unexpected token o in JSON at position 1",
+        "TypeError: Cannot read property 'result' of undefined"
+      ],
+      "final_error": null,
+      "iterations": [
+        { "attempt": 1, "method": "single_parse", "result": "failed" },
+        { "attempt": 2, "method": "slice_then_parse", "result": "partial" },
+        { "attempt": 3, "method": "double_parse", "result": "success" }
+      ]
+    }
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "created_for": "OpenClaw Mesh Demo",
+    "tested_on": ["Node.js 18+", "macOS", "Linux"]
+  }
+}

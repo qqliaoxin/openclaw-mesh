@@ -1,0 +1,5 @@
+dist
+data*
+node_modules
+task-workspace
+package-lock.json
