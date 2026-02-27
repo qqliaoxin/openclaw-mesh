@@ -15,6 +15,9 @@ class MemoryStore {
         this.accountIndex = new Map();
         this.ledger = [];
         this.escrows = new Map();
+        this.genesisNodeId = 'node_genesis';
+        this.genesisSeed = 'genesis';
+        this.genesisSupply = Number(process.env.OPENCLAW_GENESIS_SUPPLY) || 1000000;
         this.initialized = false;
     }
     
@@ -26,6 +29,7 @@ class MemoryStore {
         
         // 加载已有数据
         await this.loadFromDisk();
+        this.ensureGenesisAccount();
         
         this.initialized = true;
         console.log(`💾 Memory store initialized: ${this.dataDir}`);
@@ -81,7 +85,7 @@ class MemoryStore {
             try {
                 const data = JSON.parse(fs.readFileSync(ledgerPath, 'utf8'));
                 if (Array.isArray(data)) {
-                    this.ledger = data;
+                    this.ledger = this.normalizeLedger(data);
                 }
             } catch (e) {
                 console.error('Failed to load ledger:', e.message);
@@ -99,6 +103,8 @@ class MemoryStore {
                 console.error('Failed to load escrows:', e.message);
             }
         }
+
+        this.verifyLedgerIntegrity();
     }
     
     async saveToDisk() {
@@ -157,7 +163,7 @@ class MemoryStore {
 
     ensureAccount(nodeId, options = {}) {
         if (this.accountIndex.has(nodeId)) {
-            return this.accounts.get(this.accountIndex.get(nodeId));
+            return this.getAccountByNodeId(nodeId);
         }
         return this.createAccountWithAI(nodeId, options);
     }
@@ -167,7 +173,8 @@ class MemoryStore {
         return {
             version: 1,
             exportedAt: new Date().toISOString(),
-            account: { ...account }
+            ledgerHead: this.getLedgerHeadHash(),
+            account: { ...account, balance: this.computeBalance(account.accountId) }
         };
     }
 
@@ -182,20 +189,17 @@ class MemoryStore {
         }
         incoming.nodeId = nodeId;
         incoming.importedAt = new Date().toISOString();
-        if (typeof incoming.balance !== 'number') {
-            incoming.balance = 0;
-        }
+        incoming.balance = 0;
         this.accounts.set(incoming.accountId, incoming);
         this.accountIndex.set(nodeId, incoming.accountId);
-        this.ledger.push({
+        this.appendLedgerEntry({
             type: 'account_imported',
             accountId: incoming.accountId,
-            nodeId,
-            timestamp: Date.now()
+            nodeId
         });
         this.saveAccountsToDisk();
         this.saveLedgerToDisk();
-        return incoming;
+        return this.getAccountByNodeId(nodeId);
     }
 
     createAccountWithAI(nodeId, options = {}) {
@@ -212,26 +216,30 @@ class MemoryStore {
             algorithm,
             seedHash: crypto.createHash('sha256').update(seed).digest('hex'),
             createdAt: new Date().toISOString(),
-            balance: typeof options.initialBalance === 'number' ? options.initialBalance : 1000
+            balance: 0
         };
         this.accounts.set(accountId, account);
         this.accountIndex.set(nodeId, accountId);
-        this.ledger.push({
+        this.appendLedgerEntry({
             type: 'account_created',
             accountId,
             nodeId,
-            algorithm,
-            timestamp: Date.now()
+            algorithm
         });
         this.saveAccountsToDisk();
         this.saveLedgerToDisk();
-        return account;
+        return this.getAccountByNodeId(nodeId);
     }
 
     getAccountByNodeId(nodeId) {
         const accountId = this.accountIndex.get(nodeId);
         if (!accountId) return null;
-        return this.accounts.get(accountId) || null;
+        const account = this.accounts.get(accountId);
+        if (!account) return null;
+        return {
+            ...account,
+            balance: this.computeBalance(accountId)
+        };
     }
 
     getBalance(nodeId) {
@@ -242,40 +250,35 @@ class MemoryStore {
     debit(nodeId, amount, meta = {}) {
         if (amount <= 0) return 0;
         const account = this.ensureAccount(nodeId);
-        if (account.balance < amount) {
+        const balance = this.computeBalance(account.accountId);
+        if (balance < amount) {
             throw new Error('Insufficient balance');
         }
-        account.balance -= amount;
-        this.accounts.set(account.accountId, account);
-        this.ledger.push({
+        this.appendLedgerEntry({
             type: 'debit',
             accountId: account.accountId,
             nodeId,
             amount,
-            meta,
-            timestamp: Date.now()
+            meta
         });
         this.saveAccountsToDisk();
         this.saveLedgerToDisk();
-        return account.balance;
+        return this.computeBalance(account.accountId);
     }
 
     credit(nodeId, amount, meta = {}) {
         if (amount <= 0) return 0;
         const account = this.ensureAccount(nodeId);
-        account.balance += amount;
-        this.accounts.set(account.accountId, account);
-        this.ledger.push({
+        this.appendLedgerEntry({
             type: 'credit',
             accountId: account.accountId,
             nodeId,
             amount,
-            meta,
-            timestamp: Date.now()
+            meta
         });
         this.saveAccountsToDisk();
         this.saveLedgerToDisk();
-        return account.balance;
+        return this.computeBalance(account.accountId);
     }
 
     lockEscrow(taskId, nodeId, amount, token) {
@@ -294,13 +297,12 @@ class MemoryStore {
             lockedAt: Date.now()
         };
         this.escrows.set(taskId, escrow);
-        this.ledger.push({
+        this.appendLedgerEntry({
             type: 'escrow_locked',
             taskId,
             from: nodeId,
             amount,
-            token: token || 'CLAW',
-            timestamp: Date.now()
+            token: token || 'CLAW'
         });
         this.saveEscrowsToDisk();
         this.saveLedgerToDisk();
@@ -314,17 +316,144 @@ class MemoryStore {
         }
         this.escrows.delete(taskId);
         this.credit(winnerNodeId, escrow.amount, { reason: 'task_completed', taskId, token: escrow.token, ...meta });
-        this.ledger.push({
+        this.appendLedgerEntry({
             type: 'escrow_released',
             taskId,
             to: winnerNodeId,
             amount: escrow.amount,
-            token: escrow.token,
-            timestamp: Date.now()
+            token: escrow.token
         });
         this.saveEscrowsToDisk();
         this.saveLedgerToDisk();
         return { released: escrow.amount };
+    }
+
+    transfer(fromNodeId, toNodeId, amount, meta = {}) {
+        if (amount <= 0) return { success: false, reason: 'Invalid amount' };
+        const fromAccount = this.ensureAccount(fromNodeId);
+        const toAccount = this.ensureAccount(toNodeId);
+        const balance = this.computeBalance(fromAccount.accountId);
+        if (balance < amount) {
+            throw new Error('Insufficient balance');
+        }
+        this.appendLedgerEntry({
+            type: 'transfer',
+            from: fromAccount.accountId,
+            to: toAccount.accountId,
+            fromNodeId,
+            toNodeId,
+            amount,
+            meta
+        });
+        this.saveLedgerToDisk();
+        return { success: true };
+    }
+
+    computeBalance(accountId) {
+        let balance = 0;
+        for (const entry of this.ledger) {
+            if (entry.type === 'mint' && entry.accountId === accountId) {
+                balance += entry.amount || 0;
+            } else if (entry.type === 'credit' && entry.accountId === accountId) {
+                balance += entry.amount || 0;
+            } else if (entry.type === 'debit' && entry.accountId === accountId) {
+                balance -= entry.amount || 0;
+            } else if (entry.type === 'transfer') {
+                if (entry.from === accountId) {
+                    balance -= entry.amount || 0;
+                }
+                if (entry.to === accountId) {
+                    balance += entry.amount || 0;
+                }
+            }
+        }
+        return balance;
+    }
+
+    ensureGenesisAccount() {
+        if (this.accountIndex.has(this.genesisNodeId)) {
+            const accountId = this.accountIndex.get(this.genesisNodeId);
+            const minted = this.ledger.some(entry => entry.type === 'mint' && entry.accountId === accountId);
+            if (!minted) {
+                this.appendLedgerEntry({
+                    type: 'mint',
+                    accountId,
+                    nodeId: this.genesisNodeId,
+                    amount: this.genesisSupply
+                });
+                this.saveLedgerToDisk();
+            }
+            return;
+        }
+        const account = this.createAccountWithAI(this.genesisNodeId, {
+            algorithm: 'genesis-v1',
+            seed: this.genesisSeed
+        });
+        this.appendLedgerEntry({
+            type: 'mint',
+            accountId: account.accountId,
+            nodeId: this.genesisNodeId,
+            amount: this.genesisSupply
+        });
+        this.saveLedgerToDisk();
+    }
+
+    appendLedgerEntry(entry) {
+        const prevHash = this.getLedgerHeadHash() || null;
+        const index = this.ledger.length;
+        const payload = {
+            ...entry,
+            index,
+            prevHash,
+            timestamp: Date.now()
+        };
+        const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+        const fullEntry = { ...payload, hash };
+        this.ledger.push(fullEntry);
+        return fullEntry;
+    }
+
+    getLedgerHeadHash() {
+        if (this.ledger.length === 0) return null;
+        return this.ledger[this.ledger.length - 1].hash || null;
+    }
+
+    normalizeLedger(entries = []) {
+        const normalized = [];
+        let prevHash = null;
+        for (let i = 0; i < entries.length; i += 1) {
+            const entry = { ...entries[i] };
+            const payload = {
+                ...entry,
+                index: i,
+                prevHash,
+                timestamp: entry.timestamp || Date.now()
+            };
+            delete payload.hash;
+            const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+            normalized.push({ ...payload, hash });
+            prevHash = hash;
+        }
+        return normalized;
+    }
+
+    verifyLedgerIntegrity() {
+        let prevHash = null;
+        for (let i = 0; i < this.ledger.length; i += 1) {
+            const entry = this.ledger[i];
+            const { hash, ...payload } = entry;
+            if (payload.index !== i) {
+                throw new Error('Ledger integrity check failed');
+            }
+            if (payload.prevHash !== prevHash) {
+                throw new Error('Ledger integrity check failed');
+            }
+            const expected = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+            if (expected !== hash) {
+                throw new Error('Ledger integrity check failed');
+            }
+            prevHash = hash;
+        }
     }
     
     // 获取胶囊

@@ -86,6 +86,20 @@ npm install git+https://github.com/yourusername/openclaw-mesh.git
 说明
 
 - account export 在没有账户时会自动创建（使用 AI 算法标记），并输出标准 JSON，便于跨节点导入。
+### 账户转账
+- 新账户创建后余额为 0
+- 初始积分由 node_genesis 在账本中铸造
+- 余额来自账本流水计算，手改 accounts.json 不会改变可用余额
+- 初始铸币量可通过环境变量控制：OPENCLAW_GENESIS_SUPPLY（默认 1000000）
+
+- 账本转账命令：
+```
+openclaw-mesh account transfer --to <nodeId> --amount <number>
+```
+- 指定转出账户（可选）：
+```
+openclaw-mesh account transfer --from <nodeId>
+```
 
 ### 1. 初始化节点
 

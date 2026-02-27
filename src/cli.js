@@ -74,6 +74,7 @@ OpenClaw Mesh - 去中心化技能共享网络
   task submit <id>     提交解决方案
   account export       导出账户JSON
   account import <file>导入账户JSON
+  account transfer     账本转账
   sync                 同步网络记忆
   webui                打开WebUI
   config               查看配置
@@ -94,6 +95,7 @@ OpenClaw Mesh - 去中心化技能共享网络
   openclaw-mesh task publish --description "优化性能" --bounty 100
   openclaw-mesh account export --out account.json
   openclaw-mesh account import ./account.json
+  openclaw-mesh account transfer --to node_xxx --amount 100
 `);
 }
 
@@ -429,7 +431,19 @@ async function accountCommand(subcommand, args, configPath = null) {
             console.log(JSON.stringify({ success: true, account }, null, 2));
             return;
         }
-        console.log('Usage: openclaw-mesh account <export|import>');
+        if (subcommand === 'transfer') {
+            const fromNodeId = getArg(args, '--from', nodeId);
+            const toNodeId = getArg(args, '--to');
+            const amount = Number(getArg(args, '--amount'));
+            if (!toNodeId || !Number.isFinite(amount) || amount <= 0) {
+                console.error('❌ Usage: openclaw-mesh account transfer --to <nodeId> --amount <number> [--from <nodeId>]');
+                return;
+            }
+            const result = store.transfer(fromNodeId, toNodeId, amount, { via: 'cli' });
+            console.log(JSON.stringify(result, null, 2));
+            return;
+        }
+        console.log('Usage: openclaw-mesh account <export|import|transfer>');
     } finally {
         await store.close();
     }
