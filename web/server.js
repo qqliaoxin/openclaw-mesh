@@ -793,7 +793,7 @@ class WebUIServer {
                     capsuleSuccess: '✅ Capsule published successfully!', download: 'Download',
                     repair: 'Repair', optimize: 'Optimize', innovate: 'Innovate', working: 'Working',
                     accountTab: 'Account', accountTitle: 'Account', accountId: 'Account ID', algorithm: 'Algorithm',
-                    createdAt: 'Created At', accountBalance: 'Balance', exportAccount: 'Export Account',
+                    createdAt: 'Created At', accountBalance: 'Balance', defaultAccountJson: 'Default Account JSON', exportAccount: 'Export Account',
                     importAccount: 'Import Account', importHint: 'Paste JSON or choose file', chooseFile: 'Choose File',
                     price: 'Price', action: 'Action', buy: 'Buy', capsulePrice: 'Price (CLAW):',
                     transfer: 'Transfer', toAccountId: 'To Account ID', amount: 'Amount', transferSubmit: 'Send'
@@ -813,7 +813,7 @@ class WebUIServer {
                     capsuleSuccess: '✅ 胶囊发布成功！', download: '下载',
                     repair: '修复', optimize: '优化', innovate: '创新', working: '处理中',
                     accountTab: '账户', accountTitle: '账户信息', accountId: '账户ID', algorithm: '算法',
-                    createdAt: '创建时间', accountBalance: '余额', exportAccount: '导出账户',
+                    createdAt: '创建时间', accountBalance: '余额', defaultAccountJson: '默认账户 JSON', exportAccount: '导出账户',
                     importAccount: '导入账户', importHint: '粘贴JSON或选择文件', chooseFile: '选择文件',
                     price: '价格', action: '操作', buy: '购买', capsulePrice: '价格 (CLAW)：',
                     transfer: '转账', toAccountId: '转入账户ID', amount: '金额', transferSubmit: '发送'
@@ -826,6 +826,7 @@ class WebUIServer {
                 currentLang = currentLang === 'en' ? 'zh' : 'en';
                 document.querySelector('.lang-btn').textContent = currentLang === 'en' ? '🇨🇳 中文' : '🇺🇸 English';
                 updateLabels();
+                setupAccountDrop();
                 refreshData();
             }
             
@@ -995,9 +996,16 @@ class WebUIServer {
                         </tr>
                     </tbody>
                 </table>
+                <div class="form-group" style="margin-top:16px;">
+                    <label data-i18n="defaultAccountJson">Default Account JSON</label>
+                    <pre id="defaultAccountJson" style="white-space:pre-wrap;word-break:break-all;background:#0f111a;border:1px solid #2a2f3a;border-radius:8px;padding:10px;color:#d6e0f0;max-height:180px;overflow:auto;">-</pre>
+                </div>
                 <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
                     <button class="btn" onclick="exportAccount()" data-i18n="exportAccount">Export Account</button>
                     <input type="file" id="accountFile" accept="application/json" style="color:#fff;">
+                </div>
+                <div id="accountDrop" style="margin-top:12px;border:2px dashed #2a2f3a;border-radius:10px;padding:14px;text-align:center;color:#8892a0;">
+                    <span id="accountDropText">Drag & Drop account JSON here</span>
                 </div>
                 <div class="form-group" style="margin-top:16px;">
                     <label data-i18n="importHint">Paste JSON or choose file</label>
@@ -1034,19 +1042,40 @@ class WebUIServer {
     <script>
         let ws;
         let currentNodeId = null;
+        let wsReconnectTimer = null;
+        let wsLastMessageAt = 0;
         
         function connectWebSocket() {
+            if (ws && ws.readyState !== WebSocket.CLOSED) {
+                try { ws.close(); } catch (_) {}
+            }
             ws = new WebSocket('ws://localhost:${this.port}');
+            wsLastMessageAt = Date.now();
+            if (wsReconnectTimer) {
+                clearTimeout(wsReconnectTimer);
+                wsReconnectTimer = null;
+            }
             
             ws.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                if (data.type === 'status') {
-                    updateUI(data.data);
-                }
+                wsLastMessageAt = Date.now();
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'status') {
+                        updateUI(data.data);
+                    }
+                } catch (_) {}
             };
             
             ws.onclose = () => {
-                setTimeout(connectWebSocket, 3000);
+                if (!wsReconnectTimer) {
+                    wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+                }
+            };
+
+            ws.onerror = () => {
+                if (!wsReconnectTimer) {
+                    wsReconnectTimer = setTimeout(connectWebSocket, 3000);
+                }
             };
         }
         
@@ -1151,12 +1180,18 @@ class WebUIServer {
                 document.getElementById('accountAlgorithm').textContent = '-';
                 document.getElementById('accountCreatedAt').textContent = '-';
                 document.getElementById('accountBalance').textContent = '-';
+                document.getElementById('defaultAccountJson').textContent = '-';
                 return;
             }
-            document.getElementById('accountId').textContent = account.accountId || '-';
-            document.getElementById('accountAlgorithm').textContent = account.algorithm || '-';
-            document.getElementById('accountCreatedAt').textContent = account.createdAt || '-';
-            document.getElementById('accountBalance').textContent = typeof account.balance === 'number' ? account.balance : '-';
+            const accountId = account.accountId || account.account_id || '-';
+            const algorithm = account.algorithm || account.algorithm_name || '-';
+            const createdAt = account.createdAt || account.created_at || '-';
+            const balance = typeof account.balance === 'number' ? account.balance : '-';
+            document.getElementById('accountId').textContent = accountId;
+            document.getElementById('accountAlgorithm').textContent = algorithm;
+            document.getElementById('accountCreatedAt').textContent = createdAt;
+            document.getElementById('accountBalance').textContent = balance;
+            document.getElementById('defaultAccountJson').textContent = JSON.stringify(account, null, 2);
         }
         
         function downloadTask(taskId) {
@@ -1196,24 +1231,66 @@ class WebUIServer {
                 return;
             }
             try {
-                const payload = JSON.parse(payloadText);
+                const parsed = JSON.parse(payloadText);
+                const payload = parsed.account ? parsed : { account: parsed };
                 const res = await fetch('/api/account/import', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                const data = await res.json();
+                const contentType = res.headers.get('content-type') || '';
+                const data = contentType.includes('application/json') ? await res.json() : { success: false, error: await res.text() };
                 document.getElementById('accountResult').innerHTML = data.success
                     ? '<span style="color:green">✅ ' + (currentLang === 'zh' ? '账户已导入' : 'Account imported') + '</span>'
-                    : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
-                if (data.success) {
+                    : '<span style="color:red">❌ ' + (data.error || (currentLang === 'zh' ? '导入失败' : 'Failed')) + '</span>';
+                if (data.success && (data.data || data.account)) {
                     textInput.value = '';
                     fileInput.value = '';
-                    updateAccount(data.account);
+                    updateAccount(data.data || data.account);
+                    refreshData();
                 }
             } catch (e) {
                 document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + e.message + '</span>';
             }
+        }
+
+        function setupAccountDrop() {
+            const drop = document.getElementById('accountDrop');
+            const dropText = document.getElementById('accountDropText');
+            if (!drop) return;
+            const normalText = currentLang === 'zh' ? '拖拽账户 JSON 文件到此处' : 'Drag & Drop account JSON here';
+            const activeText = currentLang === 'zh' ? '释放以导入' : 'Drop to import';
+            dropText.textContent = normalText;
+            const stop = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+            };
+            drop.addEventListener('dragenter', (event) => {
+                stop(event);
+                drop.style.borderColor = '#4f8cff';
+                drop.style.color = '#c6d4ff';
+                dropText.textContent = activeText;
+            });
+            drop.addEventListener('dragover', stop);
+            drop.addEventListener('dragleave', (event) => {
+                stop(event);
+                drop.style.borderColor = '#2a2f3a';
+                drop.style.color = '#8892a0';
+                dropText.textContent = normalText;
+            });
+            drop.addEventListener('drop', async (event) => {
+                stop(event);
+                drop.style.borderColor = '#2a2f3a';
+                drop.style.color = '#8892a0';
+                dropText.textContent = normalText;
+                const file = event.dataTransfer && event.dataTransfer.files ? event.dataTransfer.files[0] : null;
+                if (!file) {
+                    return;
+                }
+                const text = await file.text();
+                document.getElementById('accountJson').value = text;
+                document.getElementById('accountResult').innerHTML = '<span style="color:#4f8cff">⬇ ' + (currentLang === 'zh' ? '已载入账户 JSON' : 'Account JSON loaded') + '</span>';
+            });
         }
 
         async function transferAccount() {
@@ -1341,7 +1418,18 @@ class WebUIServer {
             \`;
         }
         
+        setupAccountDrop();
         connectWebSocket();
+        setInterval(() => {
+            if (!ws) return;
+            if (ws.readyState !== WebSocket.OPEN) return;
+            const now = Date.now();
+            if (now - wsLastMessageAt > 45000) {
+                try { ws.close(); } catch (_) {}
+                return;
+            }
+            try { ws.send(JSON.stringify({ type: 'ping', ts: now })); } catch (_) {}
+        }, 15000);
         refreshData();
         setInterval(refreshData, 30000);
     </script>
