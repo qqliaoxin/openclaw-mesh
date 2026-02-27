@@ -97,7 +97,7 @@ OpenClaw Mesh - 去中心化技能共享网络
   openclaw-mesh task publish --description "优化性能" --bounty 100
   openclaw-mesh account export --out account.json
   openclaw-mesh account import ./account.json
-  openclaw-mesh account transfer --to node_xxx --amount 100
+  openclaw-mesh account transfer --to-account acct_xxx --amount 100
 `);
 }
 
@@ -413,7 +413,11 @@ async function accountCommand(subcommand, args, configPath = null) {
     const nodeId = config.nodeId;
     const dataDir = config.dataDir || './data';
     const algorithm = getArg(args, '--algorithm', 'gep-lite-v1');
-    const store = new MemoryStore(dataDir);
+    const store = new MemoryStore(dataDir, {
+        nodeId,
+        isGenesisNode: config.isGenesisNode || false,
+        masterUrl: config.masterUrl || null
+    });
     await store.init();
     try {
         if (subcommand === 'export') {
@@ -440,14 +444,15 @@ async function accountCommand(subcommand, args, configPath = null) {
             return;
         }
         if (subcommand === 'transfer') {
-            const fromNodeId = getArg(args, '--from', nodeId);
-            const toNodeId = getArg(args, '--to');
+            const fromAccountId = getArg(args, '--from-account') || getArg(args, '--from');
+            const toAccountId = getArg(args, '--to-account') || getArg(args, '--to');
             const amount = Number(getArg(args, '--amount'));
-            if (!toNodeId || !Number.isFinite(amount) || amount <= 0) {
-                console.error('❌ Usage: openclaw-mesh account transfer --to <nodeId> --amount <number> [--from <nodeId>]');
+            if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
+                console.error('❌ Usage: openclaw-mesh account transfer --to-account <accountId> --amount <number> [--from-account <accountId>]');
                 return;
             }
-            const result = store.transfer(fromNodeId, toNodeId, amount, { via: 'cli' });
+            const genesisAccountId = store.ensureAccount(store.genesisNodeId).accountId;
+            const result = store.transfer(fromAccountId || genesisAccountId, toAccountId, amount, { via: 'cli' });
             console.log(JSON.stringify(result, null, 2));
             return;
         }

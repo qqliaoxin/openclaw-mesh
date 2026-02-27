@@ -96,11 +96,11 @@ npm install git+https://github.com/qqliaoxin/openclaw-mesh.git
 
 #### 账本转账命令：
 ```
-openclaw-mesh account transfer --to <nodeId> --amount <number>
+openclaw-mesh account transfer --to-account <accountId> --amount <number>
 ```
 #### 指定转出账户（可选）：
 ```
-openclaw-mesh account transfer --from <nodeId>
+openclaw-mesh account transfer --from-account <accountId>
 ```
 
 ### 主节点同步与存储
@@ -112,8 +112,9 @@ openclaw-mesh account transfer --from <nodeId>
 ### 1. 主节点启动：
 ```bash
 ./src/cli.js init Genesis-Node --genesis --config ~/genesis.json
-
 ./src/cli.js init Genesis-Node --genesis --port 4000 --web-port 3457 --config ~/genesis.json
+
+./src/cli.js start --config ~/genesis.json
 ```
 
 初始化时将使用新的 AI 算法生成账户身份。

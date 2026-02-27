@@ -188,6 +188,33 @@ class WebUIServer {
                 res.end(JSON.stringify(data));
             });
             return;
+        } else if (url === '/api/account/transfer' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const payload = JSON.parse(body);
+                    if (this.mesh) {
+                        const toAccountId = payload.toAccountId;
+                        const amount = Number(payload.amount);
+                        if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
+                            data = { error: 'Invalid transfer payload' };
+                        } else {
+                            const genesisAccountId = this.mesh.memoryStore.ensureAccount(this.mesh.memoryStore.genesisNodeId).accountId;
+                            const fromAccountId = payload.fromAccountId || genesisAccountId;
+                            const result = this.mesh.memoryStore.transfer(fromAccountId, toAccountId, amount, { via: 'web' });
+                            data = { success: true, result };
+                        }
+                    } else {
+                        data = { error: 'Mesh not initialized' };
+                    }
+                } catch (e) {
+                    data = { error: e.message };
+                }
+                res.writeHead(200);
+                res.end(JSON.stringify(data));
+            });
+            return;
         } else if (url === '/api/memory/publish' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
@@ -767,7 +794,8 @@ class WebUIServer {
                     accountTab: 'Account', accountTitle: 'Account', accountId: 'Account ID', algorithm: 'Algorithm',
                     createdAt: 'Created At', accountBalance: 'Balance', exportAccount: 'Export Account',
                     importAccount: 'Import Account', importHint: 'Paste JSON or choose file', chooseFile: 'Choose File',
-                    price: 'Price', action: 'Action', buy: 'Buy', capsulePrice: 'Price (CLAW):'
+                    price: 'Price', action: 'Action', buy: 'Buy', capsulePrice: 'Price (CLAW):',
+                    transfer: 'Transfer', toAccountId: 'To Account ID', amount: 'Amount', transferSubmit: 'Send'
                 },
                 zh: {
                     nodeId: '节点ID', peers: '节点', memories: '记忆', tasks: '任务', uptime: '运行时间',
@@ -786,7 +814,8 @@ class WebUIServer {
                     accountTab: '账户', accountTitle: '账户信息', accountId: '账户ID', algorithm: '算法',
                     createdAt: '创建时间', accountBalance: '余额', exportAccount: '导出账户',
                     importAccount: '导入账户', importHint: '粘贴JSON或选择文件', chooseFile: '选择文件',
-                    price: '价格', action: '操作', buy: '购买', capsulePrice: '价格 (CLAW)：'
+                    price: '价格', action: '操作', buy: '购买', capsulePrice: '价格 (CLAW)：',
+                    transfer: '转账', toAccountId: '转入账户ID', amount: '金额', transferSubmit: '发送'
                 }
             };
             let currentLang = 'en';
@@ -975,6 +1004,19 @@ class WebUIServer {
                 </div>
                 <button class="btn" onclick="importAccount()" data-i18n="importAccount">Import Account</button>
                 <div id="accountResult" style="margin-top: 10px;"></div>
+            </div>
+            <div class="card" style="margin-top:20px;">
+                <h2 data-i18n="transfer">Transfer</h2>
+                <div class="form-group">
+                    <label data-i18n="toAccountId">To Account ID</label>
+                    <input type="text" id="transferToAccountId" placeholder="acct_xxx">
+                </div>
+                <div class="form-group">
+                    <label data-i18n="amount">Amount</label>
+                    <input type="number" id="transferAmount" min="1" value="1">
+                </div>
+                <button class="btn" onclick="transferAccount()" data-i18n="transferSubmit">Send</button>
+                <div id="transferResult" style="margin-top: 10px;"></div>
             </div>
         </div>
         
@@ -1170,6 +1212,33 @@ class WebUIServer {
                 }
             } catch (e) {
                 document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + e.message + '</span>';
+            }
+        }
+
+        async function transferAccount() {
+            const toAccountId = document.getElementById('transferToAccountId').value.trim();
+            const amount = Number(document.getElementById('transferAmount').value);
+            if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
+                document.getElementById('transferResult').innerHTML = '<span style="color:red">❌ ' + (currentLang === 'zh' ? '请输入账户ID和金额' : 'Provide account ID and amount') + '</span>';
+                return;
+            }
+            try {
+                const res = await fetch('/api/account/transfer', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ toAccountId, amount })
+                });
+                const data = await res.json();
+                document.getElementById('transferResult').innerHTML = data.success
+                    ? '<span style="color:green">✅ ' + (currentLang === 'zh' ? '转账成功' : 'Transfer completed') + '</span>'
+                    : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                if (data.success) {
+                    document.getElementById('transferToAccountId').value = '';
+                    document.getElementById('transferAmount').value = 1;
+                    refreshData();
+                }
+            } catch (e) {
+                document.getElementById('transferResult').innerHTML = '<span style="color:red">❌ ' + e.message + '</span>';
             }
         }
         

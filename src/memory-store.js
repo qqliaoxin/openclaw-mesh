@@ -539,26 +539,33 @@ class MemoryStore {
         return { released: escrow.amount };
     }
 
-    transfer(fromNodeId, toNodeId, amount, meta = {}) {
+    transfer(fromAccountId, toAccountId, amount, meta = {}) {
         if (amount <= 0) return { success: false, reason: 'Invalid amount' };
         if (!this.isGenesisNode) {
             throw new Error('Only genesis node can transfer');
         }
-        if (fromNodeId !== this.genesisNodeId) {
+        const genesisAccount = this.ensureAccount(this.genesisNodeId);
+        if (fromAccountId !== genesisAccount.accountId) {
             throw new Error('Only genesis account can transfer');
         }
-        const fromAccount = this.ensureAccount(fromNodeId);
-        const toAccount = this.ensureAccount(toNodeId);
-        const balance = this.computeBalance(fromAccount.accountId);
+        const fromAccount = this.accounts.get(fromAccountId);
+        if (!fromAccount) {
+            throw new Error('From account not found');
+        }
+        const toAccount = this.accounts.get(toAccountId);
+        if (!toAccount) {
+            throw new Error('To account not found');
+        }
+        const balance = this.computeBalance(fromAccountId);
         if (balance < amount) {
             throw new Error('Insufficient balance');
         }
         this.appendLedgerEntry({
             type: 'transfer',
-            from: fromAccount.accountId,
-            to: toAccount.accountId,
-            fromNodeId,
-            toNodeId,
+            from: fromAccountId,
+            to: toAccountId,
+            fromNodeId: fromAccount.nodeId,
+            toNodeId: toAccount.nodeId,
             amount,
             meta
         });
