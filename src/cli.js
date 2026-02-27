@@ -129,7 +129,23 @@ async function init(args) {
         isGenesisNode,
         createdAt: new Date().toISOString()
     };
-    
+
+    if (isGenesisNode) {
+        const store = new MemoryStore(config.dataDir, {
+            nodeId,
+            isGenesisNode: true,
+            useLance: false
+        });
+        await store.init();
+        try {
+            const operatorAccount = store.ensureAccount(nodeId, { algorithm: 'gep-lite-v1' });
+            config.genesisOperatorAccountId = operatorAccount.accountId;
+            console.log(`🔐 Genesis operator account: ${operatorAccount.accountId}`);
+        } finally {
+            await store.close();
+        }
+    }
+
     saveConfig(config);
     
     console.log(`✅ Node initialized: ${name}`);
@@ -150,7 +166,8 @@ async function start(args, configPath = null) {
         bootstrapNodes: config.bootstrapNodes || [],
         dataDir: config.dataDir || './data',
         masterUrl: getArg(args, '--master') || config.masterUrl || null,
-        isGenesisNode: args.includes('--genesis') || config.isGenesisNode || false
+        isGenesisNode: args.includes('--genesis') || config.isGenesisNode || false,
+        genesisOperatorAccountId: config.genesisOperatorAccountId || null
     };
     
     // 如果有bootstrap参数
@@ -416,7 +433,8 @@ async function accountCommand(subcommand, args, configPath = null) {
     const store = new MemoryStore(dataDir, {
         nodeId,
         isGenesisNode: config.isGenesisNode || false,
-        masterUrl: config.masterUrl || null
+        masterUrl: config.masterUrl || null,
+        genesisOperatorAccountId: config.genesisOperatorAccountId || null
     });
     await store.init();
     try {
@@ -447,12 +465,13 @@ async function accountCommand(subcommand, args, configPath = null) {
             const fromAccountId = getArg(args, '--from-account') || getArg(args, '--from');
             const toAccountId = getArg(args, '--to-account') || getArg(args, '--to');
             const amount = Number(getArg(args, '--amount'));
+            const operatorAccountId = getArg(args, '--operator-account') || config.genesisOperatorAccountId || null;
             if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
                 console.error('❌ Usage: openclaw-mesh account transfer --to-account <accountId> --amount <number> [--from-account <accountId>]');
                 return;
             }
-            const genesisAccountId = store.ensureAccount(store.genesisNodeId).accountId;
-            const result = store.transfer(fromAccountId || genesisAccountId, toAccountId, amount, { via: 'cli' });
+            const currentAccountId = store.ensureAccount(nodeId).accountId;
+            const result = store.transfer(fromAccountId || currentAccountId, toAccountId, amount, { via: 'cli', operatorAccountId });
             console.log(JSON.stringify(result, null, 2));
             return;
         }

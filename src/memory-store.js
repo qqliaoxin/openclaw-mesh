@@ -18,7 +18,9 @@ class MemoryStore {
         this.nodeId = options.nodeId || null;
         this.isGenesisNode = Boolean(options.isGenesisNode);
         this.masterUrl = options.masterUrl || null;
-        this.useLance = options.useLance !== false;
+        this.genesisOperatorAccountId = options.genesisOperatorAccountId || null;
+        const envDisable = process.env.OPENCLAW_DISABLE_LANCE === '1' || process.env.OPENCLAW_USE_LANCE === '0';
+        this.useLance = options.useLance !== false && !envDisable;
         this.lancePath = path.join(this.dataDir, 'lancedb');
         this.lanceDb = null;
         this.lance = null;
@@ -161,7 +163,12 @@ class MemoryStore {
     async saveTable(name, rows) {
         if (!this.lanceAvailable || !this.lanceDb) return;
         const payload = Array.isArray(rows) && rows.length > 0 ? rows : [{ _empty: true }];
-        await this.lanceDb.createTable(name, payload, { mode: 'overwrite' });
+        try {
+            await this.lanceDb.createTable(name, payload, { mode: 'overwrite' });
+        } catch (e) {
+            this.lanceAvailable = false;
+            this.useLance = false;
+        }
     }
 
     async ensureDataIntegrity() {
@@ -541,12 +548,14 @@ class MemoryStore {
 
     transfer(fromAccountId, toAccountId, amount, meta = {}) {
         if (amount <= 0) return { success: false, reason: 'Invalid amount' };
-        if (!this.isGenesisNode) {
-            throw new Error('Only genesis node can transfer');
-        }
         const genesisAccount = this.ensureAccount(this.genesisNodeId);
-        if (fromAccountId !== genesisAccount.accountId) {
-            throw new Error('Only genesis account can transfer');
+        if (fromAccountId === genesisAccount.accountId) {
+            if (!this.genesisOperatorAccountId) {
+                throw new Error('Genesis account operator not configured');
+            }
+            if (meta.operatorAccountId !== this.genesisOperatorAccountId) {
+                throw new Error('Genesis account operator not authorized');
+            }
         }
         const fromAccount = this.accounts.get(fromAccountId);
         if (!fromAccount) {

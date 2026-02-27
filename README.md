@@ -92,7 +92,8 @@ npm install git+https://github.com/qqliaoxin/openclaw-mesh.git
 - 初始积分由 node_genesis 在账本中铸造
 - 余额来自账本流水计算，手改 accounts.json 不会改变可用余额
 - 初始铸币量可通过环境变量控制：OPENCLAW_GENESIS_SUPPLY（默认 1000000）
-- 只有主节点可以执行账本转账，转出账户只能是 node_genesis
+- 任何账户有余额即可转账，默认转出账户为当前节点账户
+- node_genesis 账本资金只能由主节点生成的 genesisOperatorAccountId 操作
 
 #### 账本转账命令：
 ```

@@ -200,9 +200,10 @@ class WebUIServer {
                         if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
                             data = { error: 'Invalid transfer payload' };
                         } else {
-                            const genesisAccountId = this.mesh.memoryStore.ensureAccount(this.mesh.memoryStore.genesisNodeId).accountId;
-                            const fromAccountId = payload.fromAccountId || genesisAccountId;
-                            const result = this.mesh.memoryStore.transfer(fromAccountId, toAccountId, amount, { via: 'web' });
+                            const operatorAccountId = this.mesh.memoryStore.genesisOperatorAccountId || null;
+                            const defaultAccount = this.mesh.memoryStore.getAccountByNodeId(this.mesh.options.nodeId);
+                            const fromAccountId = payload.fromAccountId || defaultAccount?.accountId;
+                            const result = this.mesh.memoryStore.transfer(fromAccountId, toAccountId, amount, { via: 'web', operatorAccountId });
                             data = { success: true, result };
                         }
                     } else {
@@ -1218,6 +1219,7 @@ class WebUIServer {
         async function transferAccount() {
             const toAccountId = document.getElementById('transferToAccountId').value.trim();
             const amount = Number(document.getElementById('transferAmount').value);
+            const fromAccountId = document.getElementById('accountId').textContent.trim();
             if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
                 document.getElementById('transferResult').innerHTML = '<span style="color:red">❌ ' + (currentLang === 'zh' ? '请输入账户ID和金额' : 'Provide account ID and amount') + '</span>';
                 return;
@@ -1226,7 +1228,7 @@ class WebUIServer {
                 const res = await fetch('/api/account/transfer', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ toAccountId, amount })
+                    body: JSON.stringify({ toAccountId, amount, fromAccountId })
                 });
                 const data = await res.json();
                 document.getElementById('transferResult').innerHTML = data.success

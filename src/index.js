@@ -21,6 +21,7 @@ class OpenClawMesh {
             webPort: options.webPort || 3457,
             isGenesisNode: options.isGenesisNode ?? process.env.OPENCLAW_IS_GENESIS === '1',
             masterUrl: options.masterUrl || process.env.OPENCLAW_MASTER_URL || null,
+            genesisOperatorAccountId: options.genesisOperatorAccountId || process.env.OPENCLAW_GENESIS_OPERATOR || null,
             capsulePriceDefault: Number(options.capsulePriceDefault ?? process.env.OPENCLAW_CAPSULE_PRICE ?? 10),
             capsuleCreatorShare: Number(options.capsuleCreatorShare ?? process.env.OPENCLAW_CAPSULE_CREATOR_SHARE ?? 0.9),
             capsulePublishFee: Number(options.capsulePublishFee ?? process.env.OPENCLAW_CAPSULE_PUBLISH_FEE ?? 1),
@@ -47,7 +48,8 @@ class OpenClawMesh {
         this.memoryStore = new MemoryStore(this.options.dataDir, {
             nodeId: this.options.nodeId,
             isGenesisNode: this.options.isGenesisNode,
-            masterUrl: this.options.masterUrl
+            masterUrl: this.options.masterUrl,
+            genesisOperatorAccountId: this.options.genesisOperatorAccountId
         });
         await this.memoryStore.init();
         this.memoryStore.ensureAccount(this.options.nodeId, { algorithm: 'gep-lite-v1' });
