@@ -67,6 +67,20 @@ class WebUIServer {
         
         if (url === '/api/status') {
             data = this.mesh ? this.mesh.getStats() : { error: 'Mesh not initialized' };
+        } else if (url === '/api/account') {
+            if (this.mesh) {
+                const nodeId = this.mesh.options?.nodeId || this.mesh.node?.nodeId;
+                data = this.mesh.memoryStore.ensureAccount(nodeId);
+            } else {
+                data = { error: 'Mesh not initialized' };
+            }
+        } else if (url === '/api/account/export') {
+            if (this.mesh) {
+                const nodeId = this.mesh.options?.nodeId || this.mesh.node?.nodeId;
+                data = this.mesh.memoryStore.exportAccount(nodeId);
+            } else {
+                data = { error: 'Mesh not initialized' };
+            }
         } else if (url === '/api/memories') {
             data = this.mesh ? this.mesh.memoryStore.queryCapsules({ limit: 50 }) : [];
         } else if (url === '/api/tasks') {
@@ -136,6 +150,26 @@ class WebUIServer {
                             tags: payload.tags || []
                         });
                         data = { success: true, task };
+                    } else {
+                        data = { error: 'Mesh not initialized' };
+                    }
+                } catch (e) {
+                    data = { error: e.message };
+                }
+                res.writeHead(200);
+                res.end(JSON.stringify(data));
+            });
+            return;
+        } else if (url === '/api/account/import' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const payload = JSON.parse(body);
+                    if (this.mesh) {
+                        const nodeId = this.mesh.options?.nodeId || this.mesh.node?.nodeId;
+                        const account = this.mesh.memoryStore.importAccount(nodeId, payload);
+                        data = { success: true, account };
                     } else {
                         data = { error: 'Mesh not initialized' };
                     }
@@ -683,7 +717,10 @@ class WebUIServer {
                     descLabel: 'Description:', bountyLabel: 'Bounty (CLAW):', tagsLabel: 'Tags (comma separated):',
                     contentLabel: 'Content:', typeLabel: 'Type:', taskSuccess: '✅ Task published successfully!',
                     capsuleSuccess: '✅ Capsule published successfully!', download: 'Download',
-                    repair: 'Repair', optimize: 'Optimize', innovate: 'Innovate', working: 'Working'
+                    repair: 'Repair', optimize: 'Optimize', innovate: 'Innovate', working: 'Working',
+                    accountTab: 'Account', accountTitle: 'Account', accountId: 'Account ID', algorithm: 'Algorithm',
+                    createdAt: 'Created At', accountBalance: 'Balance', exportAccount: 'Export Account',
+                    importAccount: 'Import Account', importHint: 'Paste JSON or choose file', chooseFile: 'Choose File'
                 },
                 zh: {
                     nodeId: '节点ID', peers: '节点', memories: '记忆', tasks: '任务', uptime: '运行时间',
@@ -698,7 +735,10 @@ class WebUIServer {
                     descLabel: '描述：', bountyLabel: '赏金 (CLAW)：', tagsLabel: '标签（逗号分隔）：',
                     contentLabel: '内容：', typeLabel: '类型：', taskSuccess: '✅ 任务发布成功！',
                     capsuleSuccess: '✅ 胶囊发布成功！', download: '下载',
-                    repair: '修复', optimize: '优化', innovate: '创新', working: '处理中'
+                    repair: '修复', optimize: '优化', innovate: '创新', working: '处理中',
+                    accountTab: '账户', accountTitle: '账户信息', accountId: '账户ID', algorithm: '算法',
+                    createdAt: '创建时间', accountBalance: '余额', exportAccount: '导出账户',
+                    importAccount: '导入账户', importHint: '粘贴JSON或选择文件', chooseFile: '选择文件'
                 }
             };
             let currentLang = 'en';
@@ -745,6 +785,7 @@ class WebUIServer {
             <button class="tab" onclick="switchTab('memories')" data-i18n="memoriesTab">Memories</button>
             <button class="tab" onclick="switchTab('tasks')" data-i18n="tasksTab">Tasks</button>
             <button class="tab" onclick="switchTab('publish')" data-i18n="publish">Publish</button>
+            <button class="tab" onclick="switchTab('account')" data-i18n="accountTab">Account</button>
             <button class="tab" onclick="switchTab('stats')" data-i18n="stats">Stats</button>
         </div>
         
@@ -846,6 +887,42 @@ class WebUIServer {
                 <div id="capsuleResult" style="margin-top: 10px;"></div>
             </div>
         </div>
+
+        <div id="account" class="tab-content">
+            <div class="card">
+                <h2 data-i18n="accountTitle">Account</h2>
+                <table>
+                    <tbody>
+                        <tr>
+                            <th data-i18n="accountId">Account ID</th>
+                            <td id="accountId">-</td>
+                        </tr>
+                        <tr>
+                            <th data-i18n="algorithm">Algorithm</th>
+                            <td id="accountAlgorithm">-</td>
+                        </tr>
+                        <tr>
+                            <th data-i18n="createdAt">Created At</th>
+                            <td id="accountCreatedAt">-</td>
+                        </tr>
+                        <tr>
+                            <th data-i18n="accountBalance">Balance</th>
+                            <td id="accountBalance">-</td>
+                        </tr>
+                    </tbody>
+                </table>
+                <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
+                    <button class="btn" onclick="exportAccount()" data-i18n="exportAccount">Export Account</button>
+                    <input type="file" id="accountFile" accept="application/json" style="color:#fff;">
+                </div>
+                <div class="form-group" style="margin-top:16px;">
+                    <label data-i18n="importHint">Paste JSON or choose file</label>
+                    <textarea id="accountJson" rows="4" placeholder="{ }"></textarea>
+                </div>
+                <button class="btn" onclick="importAccount()" data-i18n="importAccount">Import Account</button>
+                <div id="accountResult" style="margin-top: 10px;"></div>
+            </div>
+        </div>
         
         <div id="stats" class="tab-content">
             <div class="card">
@@ -896,6 +973,9 @@ class WebUIServer {
                 
                 const stats = await fetch('/api/stats').then(r => r.json());
                 updateStats(stats);
+
+                const account = await fetch('/api/account').then(r => r.json());
+                updateAccount(account);
             } catch (e) {
                 console.error('Failed to refresh:', e);
             }
@@ -961,9 +1041,76 @@ class WebUIServer {
                 </tr>
             \`).join('');
         }
+
+        function updateAccount(account) {
+            if (!account || account.error) {
+                document.getElementById('accountId').textContent = '-';
+                document.getElementById('accountAlgorithm').textContent = '-';
+                document.getElementById('accountCreatedAt').textContent = '-';
+                document.getElementById('accountBalance').textContent = '-';
+                return;
+            }
+            document.getElementById('accountId').textContent = account.accountId || '-';
+            document.getElementById('accountAlgorithm').textContent = account.algorithm || '-';
+            document.getElementById('accountCreatedAt').textContent = account.createdAt || '-';
+            document.getElementById('accountBalance').textContent = typeof account.balance === 'number' ? account.balance : '-';
+        }
         
         function downloadTask(taskId) {
             window.location.href = '/api/tasks/' + taskId + '/download';
+        }
+
+        async function exportAccount() {
+            try {
+                const res = await fetch('/api/account/export');
+                const data = await res.json();
+                if (data.error) {
+                    document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + data.error + '</span>';
+                    return;
+                }
+                const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = 'openclaw-account-backup.json';
+                link.click();
+                URL.revokeObjectURL(url);
+                document.getElementById('accountResult').innerHTML = '<span style="color:green">✅ ' + (currentLang === 'zh' ? '账户已导出' : 'Account exported') + '</span>';
+            } catch (e) {
+                document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + e.message + '</span>';
+            }
+        }
+
+        async function importAccount() {
+            const fileInput = document.getElementById('accountFile');
+            const textInput = document.getElementById('accountJson');
+            let payloadText = textInput.value.trim();
+            if (!payloadText && fileInput.files && fileInput.files[0]) {
+                payloadText = await fileInput.files[0].text();
+            }
+            if (!payloadText) {
+                document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + (currentLang === 'zh' ? '请提供账户JSON' : 'Provide account JSON') + '</span>';
+                return;
+            }
+            try {
+                const payload = JSON.parse(payloadText);
+                const res = await fetch('/api/account/import', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await res.json();
+                document.getElementById('accountResult').innerHTML = data.success
+                    ? '<span style="color:green">✅ ' + (currentLang === 'zh' ? '账户已导入' : 'Account imported') + '</span>'
+                    : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                if (data.success) {
+                    textInput.value = '';
+                    fileInput.value = '';
+                    updateAccount(data.account);
+                }
+            } catch (e) {
+                document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + e.message + '</span>';
+            }
         }
         
         async function publishTask(e) {

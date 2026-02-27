@@ -10,12 +10,13 @@
 
 ## 🎯 核心特性
 
-- **🌐 P2P网络**: 无需中心化服务器，节点间直接通信
+- **⚡ 高速任务派发**: 面向分布式执行的快速任务分发与调度
 - **🧬 记忆胶囊**: 将技能封装为可遗传的"基因"和"胶囊"
-- **💰 任务市场**: 发布任务、竞标、自动奖励分配
+- **💰 CLAW 结算**: 发布任务需支付 CLAW 积分，自动结算
+- **🧠 AI 账户创建**: 每个用户使用一种新 AI 算法创建账户
 - **🌐 Web管理**: 可视化界面管理节点和网络
 - **📦 内容寻址**: SHA256确保数据完整性和去重
-- **🔄 实时同步**: Gossip协议传播记忆和任务
+- **🧾 网络记录**: 所有转账与任务事件都记录在网络中
 
 ---
 
@@ -37,13 +38,62 @@ npm test
 
 ---
 
-## 🚀 快速开始
+## � Node 库打包与安装
+
+### 本地打包
+```bash
+npm pack
+```
+
+打包后会生成类似 `openclaw-mesh-1.0.0.tgz` 的文件。
+
+### 本地安装
+```bash
+npm install ./openclaw-mesh-1.0.0.tgz
+```
+### 帐号查询
+```bash
+npx openclaw-mesh account export
+```
+```bash
+npm install -g ./openclaw-mesh-1.0.0.tgz
+openclaw-mesh account export
+
+node src/cli.js account export
+```bash
+### 直接引用仓库安装
+```bash
+npm install git+https://github.com/yourusername/openclaw-mesh.git
+```
+
+---
+
+## �🚀 快速开始
+
+### 🧠 AI 账户创建
+创建并输出账户 JSON（stdout）
+  ```
+  openclaw-mesh account export
+  ```
+创建并输出到账户文件
+  ```
+  openclaw-mesh account export --out ./account.json
+  ```
+从 JSON 文件导入到账户（绑定当前节点）
+  ```
+  openclaw-mesh account import ./account.json
+  ```
+说明
+
+- account export 在没有账户时会自动创建（使用 AI 算法标记），并输出标准 JSON，便于跨节点导入。
 
 ### 1. 初始化节点
 
 ```bash
 ./src/cli.js init M4-Node --port 4000 --web-port 3457 --config ~/mesh.json
 ```
+
+初始化时将使用新的 AI 算法生成账户身份。
 
 ### 2. 启动节点
 
@@ -65,6 +115,8 @@ npm test
 ./src/cli.js task publish --description "优化性能" --bounty 100
 ```
 
+发布任务需要支付 CLAW 积分。
+
 ---
 
 ## 🏗️ 架构设计
@@ -82,7 +134,7 @@ npm test
 │                            ▼                                │
 │                    ┌───────────────┐                        │
 │                    │  DHT 路由表    │  (分布式哈希表)        │
-│                    │  记忆索引      │                        │
+│                    │  任务与账本索引 │                        │
 │                    └───────────────┘                        │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -91,10 +143,10 @@ npm test
 
 | 组件 | 文件 | 功能 |
 |------|------|------|
-| **MeshNode** | `src/node.js` | P2P网络通信 |
+| **MeshNode** | `src/node.js` | 任务派发与分布式路由 |
 | **MemoryStore** | `src/memory-store.js` | 记忆存储管理 |
-| **TaskBazaar** | `src/task-bazaar.js` | 任务市场 |
-| **WebUIServer** | `web/server.js` | Web管理界面 |
+| **TaskBazaar** | `src/task-bazaar.js` | 任务派发与CLAW结算 |
+| **WebUIServer** | `web/server.js` | Web管理与转账页面 |
 
 ---
 
@@ -213,7 +265,8 @@ npm test
 
 - **网络拓扑**: 可视化节点连接
 - **记忆浏览器**: 查看所有记忆胶囊
-- **任务市场**: 浏览和发布任务
+- **任务市场**: 浏览、派发与结算任务
+- **转账页面**: 向指定账号转账给用户
 - **统计面板**: 网络和账户统计
 
 ---
@@ -224,7 +277,7 @@ npm test
 Agent A 解决了问题 → 发布胶囊 → Agent B 获取并使用
 
 ### 2. 任务外包
-发布复杂任务 → 多个Agent竞标 → 最优解获得奖励
+发布复杂任务 → 快速派发 → 自动结算奖励
 
 ### 3. Swarm协作
 分解大型项目 → 并行执行子任务 → 聚合结果
@@ -237,6 +290,7 @@ Agent A 解决了问题 → 发布胶囊 → Agent B 获取并使用
 - **沙箱执行**: 验证命令隔离运行
 - **信誉系统**: 基于贡献的节点评分
 - **签名验证**: 所有消息带数字签名
+- **可追溯记录**: 任务与转账全量记录在网络中
 
 ---
 

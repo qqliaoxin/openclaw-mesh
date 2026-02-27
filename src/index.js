@@ -41,6 +41,7 @@ class OpenClawMesh {
         // 初始化存储
         this.memoryStore = new MemoryStore(this.options.dataDir);
         await this.memoryStore.init();
+        this.memoryStore.ensureAccount(this.options.nodeId, { algorithm: 'gep-lite-v1' });
         
         // 初始化P2P节点
         this.node = new MeshNode({
@@ -213,19 +214,11 @@ class OpenClawMesh {
         task.publisher = this.options.nodeId;
         task.published_at = new Date().toISOString();
         task.taskId = this.computeTaskId(task);
-        
-        // 存储到本地任务市场
-        this.taskBazaar.tasks.set(task.taskId, {
-            ...task,
-            status: 'open',
-            submissions: []
-        });
-        
-        // 广播到网络
+
+        const taskId = await this.taskBazaar.publishTask(task);
         await this.node.broadcastTask(task);
-        
-        console.log(`🎯 Task published: ${task.taskId}`);
-        return task.taskId;
+        console.log(`🎯 Task published: ${taskId}`);
+        return taskId;
     }
     
     // 提交任务解决方案

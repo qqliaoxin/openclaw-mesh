@@ -17,6 +17,15 @@ class MeshNode extends EventEmitter {
         this.peers = new Map(); // peerId -> socket
         this.server = null;
         this.messageHandlers = new Map();
+        this.seenMessages = new Map();
+        this.seenTtlMs = options.seenTtlMs || 300000;
+        this.maxSeenMessages = options.maxSeenMessages || 10000;
+        this.peerStats = new Map();
+        this.pendingPings = new Map();
+        this.defaultFanout = options.fanout || 6;
+        this.taskFanout = options.taskFanout || 8;
+        this.defaultHops = options.defaultHops || 3;
+        this.taskHops = options.taskHops || 4;
         
         this.setupMessageHandlers();
     }
@@ -63,14 +72,26 @@ class MeshNode extends EventEmitter {
         
         // 处理ping
         this.messageHandlers.set('ping', (message, peerId) => {
-            this.sendToPeer(peerId, {
+            const pong = {
                 type: 'pong',
                 timestamp: Date.now()
-            });
+            };
+            if (message.pingId) {
+                pong.pingId = message.pingId;
+            }
+            this.sendToPeer(peerId, pong);
         });
         
         // 处理pong
         this.messageHandlers.set('pong', (message, peerId) => {
+            if (message.pingId) {
+                const pending = this.pendingPings.get(message.pingId);
+                if (pending && pending.peerId === peerId) {
+                    const rtt = Date.now() - pending.sentAt;
+                    this.pendingPings.delete(message.pingId);
+                    this.peerStats.set(peerId, { rtt, lastSeen: Date.now() });
+                }
+            }
             this.emit('peer:alive', peerId);
         });
     }
@@ -170,10 +191,18 @@ class MeshNode extends EventEmitter {
             }
             this.emit('peer:connected', peerId);
         }
+
+        if (!this.shouldProcessMessage(message)) {
+            return;
+        }
         
         const handler = this.messageHandlers.get(message.type);
         if (handler) {
             handler(message, peerId);
+        }
+
+        if (this.shouldRelayMessage(message)) {
+            this.relayMessage(message, peerId);
         }
     }
     
@@ -276,8 +305,7 @@ class MeshNode extends EventEmitter {
             payload: capsule,
             timestamp: Date.now()
         };
-        
-        this.broadcast(message);
+        this.broadcast(message, { fanout: this.defaultFanout, hopsLeft: this.defaultHops });
     }
     
     // 广播任务
@@ -287,15 +315,47 @@ class MeshNode extends EventEmitter {
             payload: task,
             timestamp: Date.now()
         };
-        
-        this.broadcast(message);
+        this.broadcast(message, { fanout: this.taskFanout, hopsLeft: this.taskHops });
     }
     
-    broadcast(message) {
-        for (const [peerId, socket] of this.peers) {
+    broadcast(message, options = {}) {
+        const { fanout, excludePeerId, hopsLeft } = options;
+        const peers = this.selectPeers(fanout || this.defaultFanout, excludePeerId);
+        const messageId = this.ensureMessageId(message);
+        this.markMessageSeen(messageId);
+        for (const { peerId, socket } of peers) {
             try {
                 if (socket && !socket.destroyed) {
-                    this.send(socket, message);
+                    const outbound = {
+                        ...message,
+                        messageId,
+                        hopsLeft: typeof hopsLeft === 'number' ? hopsLeft : this.defaultHops
+                    };
+                    this.send(socket, outbound);
+                } else {
+                    this.peers.delete(peerId);
+                }
+            } catch (e) {
+                console.error(`Failed to send to ${peerId}:`, e.message);
+                this.peers.delete(peerId);
+            }
+        }
+    }
+
+    broadcastAll(message, options = {}) {
+        const { excludePeerId, hopsLeft } = options;
+        const messageId = this.ensureMessageId(message);
+        this.markMessageSeen(messageId);
+        for (const [peerId, socket] of this.peers) {
+            if (excludePeerId && peerId === excludePeerId) continue;
+            try {
+                if (socket && !socket.destroyed) {
+                    const outbound = {
+                        ...message,
+                        messageId,
+                        hopsLeft: typeof hopsLeft === 'number' ? hopsLeft : this.defaultHops
+                    };
+                    this.send(socket, outbound);
                 } else {
                     this.peers.delete(peerId);
                 }
@@ -316,7 +376,7 @@ class MeshNode extends EventEmitter {
         };
         
         // 发送查询到所有peer
-        this.broadcast(query);
+        this.broadcastAll(query, { hopsLeft: 0 });
         
         // 等待响应（简化版，实际应该设置超时）
         return new Promise((resolve) => {
@@ -340,9 +400,17 @@ class MeshNode extends EventEmitter {
     
     startHeartbeat() {
         setInterval(() => {
+            const now = Date.now();
+            for (const [pingId, pending] of this.pendingPings) {
+                if (now - pending.sentAt > 15000) {
+                    this.pendingPings.delete(pingId);
+                }
+            }
             for (const [peerId, socket] of this.peers) {
                 if (socket && !socket.destroyed) {
-                    this.send(socket, { type: 'ping', timestamp: Date.now() });
+                    const pingId = crypto.randomUUID();
+                    this.pendingPings.set(pingId, { peerId, sentAt: now });
+                    this.send(socket, { type: 'ping', timestamp: now, pingId });
                 } else {
                     // Remove stale peer
                     this.peers.delete(peerId);
@@ -363,6 +431,89 @@ class MeshNode extends EventEmitter {
             }
         }
         return peers;
+    }
+
+    ensureMessageId(message) {
+        if (!message.messageId) {
+            message.messageId = crypto.randomUUID();
+        }
+        return message.messageId;
+    }
+
+    markMessageSeen(messageId) {
+        if (!messageId) return;
+        this.seenMessages.set(messageId, Date.now());
+        this.cleanupSeenMessages();
+    }
+
+    cleanupSeenMessages() {
+        const now = Date.now();
+        for (const [messageId, seenAt] of this.seenMessages) {
+            if (now - seenAt > this.seenTtlMs) {
+                this.seenMessages.delete(messageId);
+            }
+        }
+        while (this.seenMessages.size > this.maxSeenMessages) {
+            const oldest = this.seenMessages.keys().next().value;
+            if (!oldest) break;
+            this.seenMessages.delete(oldest);
+        }
+    }
+
+    shouldProcessMessage(message) {
+        if (!message || !message.messageId) {
+            return true;
+        }
+        if (this.seenMessages.has(message.messageId)) {
+            return false;
+        }
+        this.markMessageSeen(message.messageId);
+        return true;
+    }
+
+    shouldRelayMessage(message) {
+        if (!message || !message.messageId) return false;
+        if (message.type === 'handshake') return false;
+        if (message.type === 'ping' || message.type === 'pong') return false;
+        if (message.type === 'query' || message.type === 'query_response') return false;
+        if (typeof message.hopsLeft !== 'number') return true;
+        return message.hopsLeft > 0;
+    }
+
+    relayMessage(message, fromPeerId) {
+        const nextHops = typeof message.hopsLeft === 'number' ? message.hopsLeft - 1 : this.defaultHops - 1;
+        if (nextHops < 0) return;
+        const fanout = message.type === 'task' ? this.taskFanout : this.defaultFanout;
+        this.broadcast(message, {
+            fanout,
+            excludePeerId: fromPeerId,
+            hopsLeft: nextHops
+        });
+    }
+
+    selectPeers(fanout, excludePeerId) {
+        const peers = [];
+        for (const [peerId, socket] of this.peers) {
+            if (excludePeerId && peerId === excludePeerId) continue;
+            if (!socket || socket.destroyed) {
+                this.peers.delete(peerId);
+                continue;
+            }
+            const stats = this.peerStats.get(peerId);
+            peers.push({ peerId, socket, rtt: stats?.rtt });
+        }
+        const withStats = peers.filter(p => typeof p.rtt === 'number');
+        const withoutStats = peers.filter(p => typeof p.rtt !== 'number');
+        withStats.sort((a, b) => a.rtt - b.rtt);
+        for (let i = withoutStats.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [withoutStats[i], withoutStats[j]] = [withoutStats[j], withoutStats[i]];
+        }
+        const ordered = [...withStats, ...withoutStats];
+        if (!fanout || fanout >= ordered.length) {
+            return ordered;
+        }
+        return ordered.slice(0, fanout);
     }
     
     async stop() {

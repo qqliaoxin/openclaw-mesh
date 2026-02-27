@@ -16,7 +16,6 @@ class TaskBazaar extends EventEmitter {
         this.submissions = new Map(); // taskId -> [solutions]
         this.completedTasks = new Set();
         
-        // 积分系统（简化版）
         this.balance = 1000; // 初始积分
         this.escrow = new Map(); // taskId -> locked amount
     }
@@ -32,14 +31,19 @@ class TaskBazaar extends EventEmitter {
         if (!task.taskId) {
             task.taskId = this.generateTaskId(task);
         }
-        
-        // 锁定赏金
-        if (this.balance < task.bounty.amount) {
-            throw new Error('Insufficient balance');
+
+        task.publisher = task.publisher || this.nodeId;
+        task.bounty.token = task.bounty.token || 'CLAW';
+
+        if (this.memoryStore && typeof this.memoryStore.lockEscrow === 'function') {
+            this.memoryStore.lockEscrow(task.taskId, task.publisher, task.bounty.amount, task.bounty.token);
+        } else {
+            if (this.balance < task.bounty.amount) {
+                throw new Error('Insufficient balance');
+            }
+            this.balance -= task.bounty.amount;
+            this.escrow.set(task.taskId, task.bounty.amount);
         }
-        
-        this.balance -= task.bounty.amount;
-        this.escrow.set(task.taskId, task.bounty.amount);
         
         // 存储任务
         task.status = 'open';
@@ -92,8 +96,14 @@ class TaskBazaar extends EventEmitter {
             task.winner = solverId;
             
             // 发放奖励
-            const reward = this.escrow.get(taskId) || 0;
-            this.escrow.delete(taskId);
+            let reward = 0;
+            if (this.memoryStore && typeof this.memoryStore.releaseEscrow === 'function') {
+                const released = this.memoryStore.releaseEscrow(taskId, solverId);
+                reward = released.released || 0;
+            } else {
+                reward = this.escrow.get(taskId) || 0;
+                this.escrow.delete(taskId);
+            }
             
             console.log(`🏆 Task completed: ${taskId}`);
             console.log(`   Winner: ${solverId}`);
@@ -194,6 +204,15 @@ class TaskBazaar extends EventEmitter {
     
     // 获取余额
     getBalance() {
+        if (this.memoryStore && typeof this.memoryStore.getBalance === 'function') {
+            const locked = Array.from(this.memoryStore.escrows?.values?.() || [])
+                .filter(e => e.from === this.nodeId)
+                .reduce((a, b) => a + (b.amount || 0), 0);
+            return {
+                available: this.memoryStore.getBalance(this.nodeId),
+                locked
+            };
+        }
         return {
             available: this.balance,
             locked: Array.from(this.escrow.values()).reduce((a, b) => a + b, 0)

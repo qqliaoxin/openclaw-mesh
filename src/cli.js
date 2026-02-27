@@ -5,6 +5,7 @@
  */
 
 const OpenClawMesh = require('./index');
+const MemoryStore = require('./memory-store');
 const fs = require('fs');
 const path = require('path');
 
@@ -40,6 +41,18 @@ function saveConfig(config) {
     fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
+function ensureNodeConfig(config) {
+    const crypto = require('crypto');
+    if (!config.nodeId) {
+        config.nodeId = 'node_' + crypto.randomBytes(8).toString('hex');
+    }
+    if (!config.dataDir) {
+        config.dataDir = './data';
+    }
+    saveConfig(config);
+    return config;
+}
+
 // 显示帮助
 function showHelp() {
     console.log(`
@@ -59,6 +72,8 @@ OpenClaw Mesh - 去中心化技能共享网络
   task publish         发布任务
   task list            列出任务
   task submit <id>     提交解决方案
+  account export       导出账户JSON
+  account import <file>导入账户JSON
   sync                 同步网络记忆
   webui                打开WebUI
   config               查看配置
@@ -77,6 +92,8 @@ OpenClaw Mesh - 去中心化技能共享网络
   openclaw-mesh publish ./skill.json --tags trading,api
   openclaw-mesh search "JSON parse error"
   openclaw-mesh task publish --description "优化性能" --bounty 100
+  openclaw-mesh account export --out account.json
+  openclaw-mesh account import ./account.json
 `);
 }
 
@@ -381,6 +398,43 @@ async function config() {
     console.log(JSON.stringify(cfg, null, 2));
 }
 
+async function accountCommand(subcommand, args, configPath = null) {
+    const config = ensureNodeConfig(loadConfig(configPath));
+    const nodeId = config.nodeId;
+    const dataDir = config.dataDir || './data';
+    const algorithm = getArg(args, '--algorithm', 'gep-lite-v1');
+    const store = new MemoryStore(dataDir);
+    await store.init();
+    try {
+        if (subcommand === 'export') {
+            store.ensureAccount(nodeId, { algorithm });
+            const payload = store.exportAccount(nodeId);
+            const outPath = getArg(args, '--out');
+            if (outPath) {
+                fs.writeFileSync(path.resolve(outPath), JSON.stringify(payload, null, 2));
+                console.log(`✅ Account exported: ${path.resolve(outPath)}`);
+            } else {
+                console.log(JSON.stringify(payload, null, 2));
+            }
+            return;
+        }
+        if (subcommand === 'import') {
+            const file = args[0] || getArg(args, '--file');
+            if (!file || !fs.existsSync(file)) {
+                console.error('❌ Please specify account JSON file');
+                return;
+            }
+            const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
+            const account = store.importAccount(nodeId, payload);
+            console.log(JSON.stringify({ success: true, account }, null, 2));
+            return;
+        }
+        console.log('Usage: openclaw-mesh account <export|import>');
+    } finally {
+        await store.close();
+    }
+}
+
 // 主函数
 async function main() {
     const args = process.argv.slice(2);
@@ -419,6 +473,9 @@ async function main() {
             break;
         case 'task':
             await taskCommand(subArgs[0], subArgs.slice(1));
+            break;
+        case 'account':
+            await accountCommand(subArgs[0], subArgs.slice(1), configArg);
             break;
         case 'sync':
             await sync(subArgs);
