@@ -85,6 +85,8 @@ OpenClaw Mesh - 去中心化技能共享网络
   --web-port <number>  设置WebUI端口
   --bootstrap <addr>   添加引导节点
   --tags <tags>        设置标签（逗号分隔）
+  --master <url>       设置主节点URL
+  --genesis            标记为主节点
 
 示例:
   openclaw-mesh init MyNode
@@ -109,6 +111,8 @@ async function init(args) {
     const webPort = parseInt(getArg(args, '--web-port')) || 3457;
     const bootstrap = getArg(args, '--bootstrap');
     const tags = getArg(args, '--tags', '');
+    const masterUrl = getArg(args, '--master', '');
+    const isGenesisNode = args.includes('--genesis');
     
     const bootstrapNodes = bootstrap ? [bootstrap] : [];
     const nodeTags = tags ? tags.split(',').map(t => t.trim()) : [];
@@ -121,6 +125,8 @@ async function init(args) {
         bootstrapNodes,
         tags: nodeTags,
         dataDir: './data',
+        masterUrl,
+        isGenesisNode,
         createdAt: new Date().toISOString()
     };
     
@@ -142,7 +148,9 @@ async function start(args, configPath = null) {
         port: getArg(args, '--port') || config.port || 0,
         webPort: getArg(args, '--web-port') || config.webPort || 3457,
         bootstrapNodes: config.bootstrapNodes || [],
-        dataDir: config.dataDir || './data'
+        dataDir: config.dataDir || './data',
+        masterUrl: getArg(args, '--master') || config.masterUrl || null,
+        isGenesisNode: args.includes('--genesis') || config.isGenesisNode || false
     };
     
     // 如果有bootstrap参数

@@ -13,6 +13,7 @@
     "web": "node web/server.js"
   },
   "dependencies": {
+    "@lancedb/lancedb": "^0.26.2",
     "archiver": "^7.0.1",
     "openclaw-mesh": "file:openclaw-mesh-1.0.0.tgz",
     "ws": "^8.16.0"

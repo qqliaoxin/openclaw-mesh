@@ -24,10 +24,10 @@
 
 ```bash
 # 克隆仓库
-git clone https://github.com/yourusername/openclaw-mesh.git
+git clone https://github.com/qqliaoxin/openclaw-mesh.git
 cd openclaw-mesh
 
-# 安装依赖（仅需 ws 库）
+# 安装依赖
 npm install
 
 # 运行测试
@@ -35,10 +35,11 @@ npm test
 ```
 
 **系统要求**: Node.js >= 18.0.0
+**存储**: 使用 LanceDB 作为本地账本与数据存储
 
 ---
 
-## � Node 库打包与安装
+## 📦 Node 库打包与安装
 
 ### 本地打包
 ```bash
@@ -63,12 +64,12 @@ node src/cli.js account export
 ```bash
 ### 直接引用仓库安装
 ```bash
-npm install git+https://github.com/yourusername/openclaw-mesh.git
+npm install git+https://github.com/qqliaoxin/openclaw-mesh.git
 ```
 
 ---
 
-## �🚀 快速开始
+## 🚀 快速开始
 
 ### 🧠 AI 账户创建
 创建并输出账户 JSON（stdout）
@@ -91,28 +92,36 @@ npm install git+https://github.com/yourusername/openclaw-mesh.git
 - 初始积分由 node_genesis 在账本中铸造
 - 余额来自账本流水计算，手改 accounts.json 不会改变可用余额
 - 初始铸币量可通过环境变量控制：OPENCLAW_GENESIS_SUPPLY（默认 1000000）
+- 只有主节点可以执行账本转账，转出账户只能是 node_genesis
 
-- 账本转账命令：
+#### 账本转账命令：
 ```
 openclaw-mesh account transfer --to <nodeId> --amount <number>
 ```
-- 指定转出账户（可选）：
+#### 指定转出账户（可选）：
 ```
 openclaw-mesh account transfer --from <nodeId>
 ```
 
-### 1. 初始化节点
+### 主节点同步与存储
+- 所有节点使用 LanceDB 保存账本与数据
+- 非主节点会定期从主节点同步并覆盖不一致的数据
 
+## 初始化节点
+
+### 1. 主节点启动：
 ```bash
-./src/cli.js init M4-Node --port 4000 --web-port 3457 --config ~/mesh.json
+./src/cli.js init Genesis-Node --genesis --config ~/genesis.json
+
+./src/cli.js init Genesis-Node --genesis --port 4000 --web-port 3457 --config ~/genesis.json
 ```
 
 初始化时将使用新的 AI 算法生成账户身份。
 
-### 2. 启动节点
+### 2. 从节点启动并同步主节点
 
 ```bash
-./src/cli.js start --config ~/mesh.json
+./src/cli.js start --config ~/mesh.json --master http://localhost:3457
 ```
 
 启动后访问 WebUI: http://localhost:3457
@@ -122,6 +131,8 @@ openclaw-mesh account transfer --from <nodeId>
 ```bash
 ./src/cli.js publish ./examples/sample-capsule.json --tags trading,api
 ```
+
+发布胶囊后，其他节点需要付费购买才能下载使用。
 
 ### 4. 发布任务
 

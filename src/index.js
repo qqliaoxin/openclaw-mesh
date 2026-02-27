@@ -19,6 +19,11 @@ class OpenClawMesh {
             bootstrapNodes: options.bootstrapNodes || [],
             dataDir: options.dataDir || './data',
             webPort: options.webPort || 3457,
+            isGenesisNode: options.isGenesisNode ?? process.env.OPENCLAW_IS_GENESIS === '1',
+            masterUrl: options.masterUrl || process.env.OPENCLAW_MASTER_URL || null,
+            capsulePriceDefault: Number(options.capsulePriceDefault ?? process.env.OPENCLAW_CAPSULE_PRICE ?? 10),
+            capsuleCreatorShare: Number(options.capsuleCreatorShare ?? process.env.OPENCLAW_CAPSULE_CREATOR_SHARE ?? 0.9),
+            capsulePublishFee: Number(options.capsulePublishFee ?? process.env.OPENCLAW_CAPSULE_PUBLISH_FEE ?? 1),
             ...options
         };
         
@@ -39,7 +44,11 @@ class OpenClawMesh {
         console.log(`   Node ID: ${this.options.nodeId}`);
         
         // 初始化存储
-        this.memoryStore = new MemoryStore(this.options.dataDir);
+        this.memoryStore = new MemoryStore(this.options.dataDir, {
+            nodeId: this.options.nodeId,
+            isGenesisNode: this.options.isGenesisNode,
+            masterUrl: this.options.masterUrl
+        });
         await this.memoryStore.init();
         this.memoryStore.ensureAccount(this.options.nodeId, { algorithm: 'gep-lite-v1' });
         
@@ -70,6 +79,14 @@ class OpenClawMesh {
         
         // 设置事件监听
         this.setupEventHandlers();
+        if (!this.options.isGenesisNode && this.options.masterUrl) {
+            this.syncInterval = setInterval(async () => {
+                try {
+                    await this.memoryStore.syncFromMaster(this.options.masterUrl);
+                } catch (e) {
+                }
+            }, 60000);
+        }
         
         this.initialized = true;
         console.log(`✅ OpenClaw Mesh initialized successfully!`);
@@ -186,20 +203,63 @@ class OpenClawMesh {
             throw new Error('Mesh not initialized');
         }
         
+        if (!capsule.price) {
+            capsule.price = {
+                amount: this.options.capsulePriceDefault,
+                token: 'CLAW',
+                creatorShare: this.options.capsuleCreatorShare
+            };
+        } else if (typeof capsule.price.creatorShare !== 'number') {
+            capsule.price.creatorShare = this.options.capsuleCreatorShare;
+        }
+
         // 添加创建者信息
+        const creator = capsule.attribution?.creator || this.options.nodeId;
         capsule.attribution = {
-            creator: this.options.nodeId,
+            creator,
             created_at: new Date().toISOString()
         };
         
         // 计算asset_id
         capsule.asset_id = this.computeAssetId(capsule);
+
+        if (!this.options.isGenesisNode && this.options.masterUrl) {
+            const res = await fetch(`${this.options.masterUrl.replace(/\/$/, '')}/api/memory/publish`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    content: capsule.content,
+                    type: capsule.type,
+                    tags: capsule.tags || [],
+                    price: capsule.price,
+                    publisher: this.options.nodeId
+                })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                throw new Error(data.error || 'Failed to publish capsule');
+            }
+            if (data.capsule) {
+                await this.memoryStore.storeCapsule(data.capsule);
+                return data.capsule.asset_id;
+            }
+            return data.assetId;
+        }
+
+        if (this.options.capsulePublishFee > 0) {
+            this.memoryStore.debit(this.options.nodeId, this.options.capsulePublishFee, { reason: 'capsule_publish', assetId: capsule.asset_id });
+        }
         
         // 本地存储
         await this.memoryStore.storeCapsule(capsule);
         
         // 广播到网络
-        await this.node.broadcastCapsule(capsule);
+        const capsuleMeta = {
+            ...capsule,
+            content: null,
+            contentHash: capsule.asset_id
+        };
+        await this.node.broadcastCapsule(capsuleMeta);
         
         console.log(`✅ Capsule published: ${capsule.asset_id}`);
         return capsule.asset_id;
@@ -211,14 +271,77 @@ class OpenClawMesh {
             throw new Error('Mesh not initialized');
         }
         
-        task.publisher = this.options.nodeId;
+        task.publisher = task.publisher || this.options.nodeId;
         task.published_at = new Date().toISOString();
         task.taskId = this.computeTaskId(task);
+
+        if (!this.options.isGenesisNode && this.options.masterUrl) {
+            const res = await fetch(`${this.options.masterUrl.replace(/\/$/, '')}/api/task/publish`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    description: task.description,
+                    bounty: task.bounty?.amount || 0,
+                    tags: task.tags || [],
+                    publisher: task.publisher
+                })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                throw new Error(data.error || 'Failed to publish task');
+            }
+            if (data.task) {
+                await this.taskBazaar.handleNewTask(data.task);
+                return data.task.taskId;
+            }
+            return data.taskId || data.task;
+        }
 
         const taskId = await this.taskBazaar.publishTask(task);
         await this.node.broadcastTask(task);
         console.log(`🎯 Task published: ${taskId}`);
         return taskId;
+    }
+
+    async purchaseCapsule(assetId, buyerNodeId = null) {
+        if (!this.initialized) {
+            throw new Error('Mesh not initialized');
+        }
+        const buyer = buyerNodeId || this.options.nodeId;
+        if (!this.options.isGenesisNode && this.options.masterUrl) {
+            const res = await fetch(`${this.options.masterUrl.replace(/\/$/, '')}/api/capsule/purchase`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ assetId, buyerNodeId: buyer })
+            });
+            const data = await res.json();
+            if (!data.success) {
+                throw new Error(data.error || 'Failed to purchase capsule');
+            }
+            if (data.capsule) {
+                await this.memoryStore.storeCapsule(data.capsule);
+                return data.capsule;
+            }
+            return null;
+        }
+        const capsule = this.memoryStore.getCapsule(assetId);
+        if (!capsule) {
+            throw new Error('Capsule not found');
+        }
+        const price = capsule.price?.amount || 0;
+        if (price > 0 && buyer !== capsule.attribution?.creator) {
+            const share = typeof capsule.price?.creatorShare === 'number' ? capsule.price.creatorShare : this.options.capsuleCreatorShare;
+            const creatorAmount = Math.floor(price * share);
+            const platformAmount = price - creatorAmount;
+            this.memoryStore.debit(buyer, price, { reason: 'capsule_purchase', assetId });
+            if (creatorAmount > 0) {
+                this.memoryStore.credit(capsule.attribution.creator, creatorAmount, { reason: 'capsule_revenue', assetId });
+            }
+            if (platformAmount > 0) {
+                this.memoryStore.credit(this.memoryStore.genesisNodeId, platformAmount, { reason: 'capsule_platform_fee', assetId });
+            }
+        }
+        return capsule;
     }
     
     // 提交任务解决方案
@@ -274,6 +397,10 @@ class OpenClawMesh {
         
         if (this.memoryStore) {
             await this.memoryStore.close();
+        }
+
+        if (this.syncInterval) {
+            clearInterval(this.syncInterval);
         }
         
         console.log('✅ OpenClaw Mesh stopped');

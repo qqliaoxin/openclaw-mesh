@@ -82,20 +82,26 @@ class WebUIServer {
                 data = { error: 'Mesh not initialized' };
             }
         } else if (url === '/api/memories') {
-            data = this.mesh ? this.mesh.memoryStore.queryCapsules({ limit: 50 }) : [];
+            data = this.mesh ? this.sanitizeCapsules(this.mesh.memoryStore.queryCapsules({ limit: 50 })) : [];
         } else if (url === '/api/tasks') {
             data = this.mesh ? this.mesh.taskBazaar.getTasks() : [];
         } else if (url === '/api/peers') {
             data = this.mesh ? this.mesh.node.getPeers() : [];
         } else if (url.startsWith('/api/memory/')) {
             const assetId = url.split('/').pop();
-            data = this.mesh ? this.mesh.memoryStore.getCapsule(assetId) : null;
+            data = this.mesh ? this.sanitizeCapsule(this.mesh.memoryStore.getCapsule(assetId)) : null;
         } else if (url === '/api/stats') {
             data = {
                 memories: this.mesh ? this.mesh.memoryStore.getStats() : {},
                 tasks: this.mesh ? this.mesh.taskBazaar.getStats() : {},
                 balance: this.mesh ? this.mesh.taskBazaar.getBalance() : {}
             };
+        } else if (url === '/api/snapshot') {
+            if (this.mesh?.options?.isGenesisNode) {
+                data = this.mesh.memoryStore.getSnapshot();
+            } else {
+                data = { error: 'Not authorized' };
+            }
         } else if (url.startsWith('/api/tasks/') && url.endsWith('/download')) {
             // Handle task package download
             const parts = url.split('/');
@@ -144,12 +150,14 @@ class WebUIServer {
                 try {
                     const payload = JSON.parse(body);
                     if (this.mesh) {
-                        const task = await this.mesh.publishTask({
+                        const taskId = await this.mesh.publishTask({
                             description: payload.description,
                             bounty: { amount: payload.bounty || 100, token: 'CLAW' },
-                            tags: payload.tags || []
+                            tags: payload.tags || [],
+                            publisher: payload.publisher
                         });
-                        data = { success: true, task };
+                        const task = this.mesh.taskBazaar.getTask(taskId);
+                        data = { success: true, task, taskId };
                     } else {
                         data = { error: 'Mesh not initialized' };
                     }
@@ -187,11 +195,33 @@ class WebUIServer {
                 try {
                     const payload = JSON.parse(body);
                     if (this.mesh) {
-                        const capsule = await this.mesh.publishCapsule({
+                        const assetId = await this.mesh.publishCapsule({
                             content: payload.content,
                             type: payload.type || 'repair',
-                            tags: payload.tags || []
+                            tags: payload.tags || [],
+                            price: payload.price,
+                            attribution: payload.publisher ? { creator: payload.publisher } : undefined
                         });
+                        const capsule = this.mesh.memoryStore.getCapsule(assetId);
+                        data = { success: true, capsule, assetId };
+                    } else {
+                        data = { error: 'Mesh not initialized' };
+                    }
+                } catch (e) {
+                    data = { error: e.message };
+                }
+                res.writeHead(200);
+                res.end(JSON.stringify(data));
+            });
+            return;
+        } else if (url === '/api/capsule/purchase' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const payload = JSON.parse(body);
+                    if (this.mesh) {
+                        const capsule = await this.mesh.purchaseCapsule(payload.assetId, payload.buyerNodeId);
                         data = { success: true, capsule };
                     } else {
                         data = { error: 'Mesh not initialized' };
@@ -207,6 +237,22 @@ class WebUIServer {
         
         res.writeHead(200);
         res.end(JSON.stringify(data));
+    }
+
+    sanitizeCapsules(capsules) {
+        if (!Array.isArray(capsules)) return [];
+        return capsules.map(capsule => this.sanitizeCapsule(capsule));
+    }
+
+    sanitizeCapsule(capsule) {
+        if (!capsule) return null;
+        if (this.mesh?.options?.isGenesisNode) {
+            return capsule;
+        }
+        return {
+            ...capsule,
+            content: null
+        };
     }
     
     handleWebSocket(ws) {
@@ -720,7 +766,8 @@ class WebUIServer {
                     repair: 'Repair', optimize: 'Optimize', innovate: 'Innovate', working: 'Working',
                     accountTab: 'Account', accountTitle: 'Account', accountId: 'Account ID', algorithm: 'Algorithm',
                     createdAt: 'Created At', accountBalance: 'Balance', exportAccount: 'Export Account',
-                    importAccount: 'Import Account', importHint: 'Paste JSON or choose file', chooseFile: 'Choose File'
+                    importAccount: 'Import Account', importHint: 'Paste JSON or choose file', chooseFile: 'Choose File',
+                    price: 'Price', action: 'Action', buy: 'Buy', capsulePrice: 'Price (CLAW):'
                 },
                 zh: {
                     nodeId: '节点ID', peers: '节点', memories: '记忆', tasks: '任务', uptime: '运行时间',
@@ -738,7 +785,8 @@ class WebUIServer {
                     repair: '修复', optimize: '优化', innovate: '创新', working: '处理中',
                     accountTab: '账户', accountTitle: '账户信息', accountId: '账户ID', algorithm: '算法',
                     createdAt: '创建时间', accountBalance: '余额', exportAccount: '导出账户',
-                    importAccount: '导入账户', importHint: '粘贴JSON或选择文件', chooseFile: '选择文件'
+                    importAccount: '导入账户', importHint: '粘贴JSON或选择文件', chooseFile: '选择文件',
+                    price: '价格', action: '操作', buy: '购买', capsulePrice: '价格 (CLAW)：'
                 }
             };
             let currentLang = 'en';
@@ -818,6 +866,8 @@ class WebUIServer {
                             <th data-i18n="type">Type</th>
                             <th data-i18n="confidence">Confidence</th>
                             <th data-i18n="creator">Creator</th>
+                            <th data-i18n="price">Price</th>
+                            <th data-i18n="action">Action</th>
                         </tr>
                     </thead>
                     <tbody></tbody>
@@ -879,6 +929,10 @@ class WebUIServer {
                         </select>
                     </div>
                     <div class="form-group">
+                        <label data-i18n="capsulePrice">Price (CLAW):</label>
+                        <input type="number" id="capsulePrice" min="0" value="10">
+                    </div>
+                    <div class="form-group">
                         <label>Tags:</label>
                         <input type="text" id="capsuleTags" placeholder="javascript, error-handling">
                     </div>
@@ -936,6 +990,7 @@ class WebUIServer {
     
     <script>
         let ws;
+        let currentNodeId = null;
         
         function connectWebSocket() {
             ws = new WebSocket('ws://localhost:${this.port}');
@@ -987,6 +1042,7 @@ class WebUIServer {
             document.getElementById('peerCount').textContent = data.peers ? data.peers.length : 0;
             document.getElementById('memoryCount').textContent = data.memoryCount || 0;
             document.getElementById('taskCount').textContent = data.taskCount || 0;
+            currentNodeId = data.nodeId || null;
             
             updateNodeList(data.nodeId, data.peers || []);
         }
@@ -1019,6 +1075,10 @@ class WebUIServer {
                     <td>\${m.type}</td>
                     <td>\${(m.confidence * 100).toFixed(0)}%</td>
                     <td>\${m.attribution.creator.slice(0, 10)}...</td>
+                    <td>\${m.price?.amount || 0} \${m.price?.token || 'CLAW'}</td>
+                    <td>
+                        <button class="btn-small" onclick="purchaseCapsule('\${m.asset_id}')">💳 \${t('buy')}</button>
+                    </td>
                 </tr>
             \`).join('');
         }
@@ -1146,12 +1206,13 @@ class WebUIServer {
             const content = document.getElementById('capsuleContent').value;
             const type = document.getElementById('capsuleType').value;
             const tags = document.getElementById('capsuleTags').value.split(',').map(t => t.trim()).filter(t => t);
+            const price = Number(document.getElementById('capsulePrice').value || 0);
             
             try {
                 const res = await fetch('/api/memory/publish', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content, type, tags })
+                    body: JSON.stringify({ content, type, tags, price: { amount: price, token: 'CLAW' } })
                 });
                 const data = await res.json();
                 document.getElementById('capsuleResult').innerHTML = data.success 
@@ -1163,6 +1224,30 @@ class WebUIServer {
                 }
             } catch (e) {
                 document.getElementById('capsuleResult').innerHTML = '<span style="color:red">❌ Error: ' + e.message + '</span>';
+            }
+        }
+
+        async function purchaseCapsule(assetId) {
+            try {
+                const res = await fetch('/api/capsule/purchase', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ assetId, buyerNodeId: currentNodeId })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert(data.error || 'Purchase failed');
+                    return;
+                }
+                const blob = new Blob([JSON.stringify(data.capsule, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = assetId + '.json';
+                link.click();
+                URL.revokeObjectURL(url);
+            } catch (e) {
+                alert(e.message);
             }
         }
         

@@ -8,13 +8,21 @@ const path = require('path');
 const crypto = require('crypto');
 
 class MemoryStore {
-    constructor(dataDir = './data') {
+    constructor(dataDir = './data', options = {}) {
         this.dataDir = dataDir;
         this.capsules = new Map();
         this.accounts = new Map();
         this.accountIndex = new Map();
         this.ledger = [];
         this.escrows = new Map();
+        this.nodeId = options.nodeId || null;
+        this.isGenesisNode = Boolean(options.isGenesisNode);
+        this.masterUrl = options.masterUrl || null;
+        this.useLance = options.useLance !== false;
+        this.lancePath = path.join(this.dataDir, 'lancedb');
+        this.lanceDb = null;
+        this.lance = null;
+        this.lanceAvailable = false;
         this.genesisNodeId = 'node_genesis';
         this.genesisSeed = 'genesis';
         this.genesisSupply = Number(process.env.OPENCLAW_GENESIS_SUPPLY) || 1000000;
@@ -26,10 +34,16 @@ class MemoryStore {
         if (!fs.existsSync(this.dataDir)) {
             fs.mkdirSync(this.dataDir, { recursive: true });
         }
+        await this.initLance();
         
         // 加载已有数据
         await this.loadFromDisk();
-        this.ensureGenesisAccount();
+        await this.ensureDataIntegrity();
+        if (this.isGenesisNode) {
+            this.ensureGenesisAccount();
+        } else if (this.masterUrl) {
+            await this.syncFromMaster(this.masterUrl);
+        }
         
         this.initialized = true;
         console.log(`💾 Memory store initialized: ${this.dataDir}`);
@@ -51,8 +65,180 @@ class MemoryStore {
     getEscrowPath() {
         return path.join(this.dataDir, 'escrows.json');
     }
+
+    async initLance() {
+        if (!this.useLance) return;
+        try {
+            const lancedb = await import('@lancedb/lancedb');
+            this.lance = lancedb;
+            this.lanceDb = await lancedb.connect(this.lancePath);
+            this.lanceAvailable = true;
+        } catch (e) {
+            this.lanceAvailable = false;
+        }
+    }
+
+    async loadFromLance() {
+        if (!this.lanceAvailable || !this.lanceDb) return false;
+        try {
+            const capsulesTable = await this.openTable('capsules');
+            if (capsulesTable) {
+                const rows = await capsulesTable.toArray();
+                for (const row of rows) {
+                    if (row && row._empty) {
+                        continue;
+                    }
+                    if (row && row.capsule_json) {
+                        const capsule = JSON.parse(row.capsule_json);
+                        this.capsules.set(capsule.asset_id, capsule);
+                    }
+                }
+            }
+            const accountsTable = await this.openTable('accounts');
+            if (accountsTable) {
+                const rows = await accountsTable.toArray();
+                for (const row of rows) {
+                    if (row && row._empty) {
+                        continue;
+                    }
+                    if (row && row.account_json) {
+                        const account = JSON.parse(row.account_json);
+                        this.accounts.set(account.accountId, account);
+                    }
+                }
+            }
+            const indexTable = await this.openTable('account_index');
+            if (indexTable) {
+                const rows = await indexTable.toArray();
+                for (const row of rows) {
+                    if (row && row._empty) {
+                        continue;
+                    }
+                    if (row && row.nodeId && row.accountId) {
+                        this.accountIndex.set(row.nodeId, row.accountId);
+                    }
+                }
+            }
+            const ledgerTable = await this.openTable('ledger');
+            if (ledgerTable) {
+                const rows = await ledgerTable.toArray();
+                const entries = rows.filter(row => !(row && row._empty)).map(row => {
+                    if (row.ledger_json) {
+                        return JSON.parse(row.ledger_json);
+                    }
+                    return row;
+                });
+                this.ledger = this.normalizeLedger(entries);
+            }
+            const escrowsTable = await this.openTable('escrows');
+            if (escrowsTable) {
+                const rows = await escrowsTable.toArray();
+                for (const row of rows) {
+                    if (row && row._empty) {
+                        continue;
+                    }
+                    const escrow = row.escrow_json ? JSON.parse(row.escrow_json) : row;
+                    if (escrow && escrow.taskId) {
+                        this.escrows.set(escrow.taskId, escrow);
+                    }
+                }
+            }
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+
+    async openTable(name) {
+        if (!this.lanceDb) return null;
+        try {
+            return await this.lanceDb.openTable(name);
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async saveTable(name, rows) {
+        if (!this.lanceAvailable || !this.lanceDb) return;
+        const payload = Array.isArray(rows) && rows.length > 0 ? rows : [{ _empty: true }];
+        await this.lanceDb.createTable(name, payload, { mode: 'overwrite' });
+    }
+
+    async ensureDataIntegrity() {
+        try {
+            this.verifyLedgerIntegrity();
+        } catch (e) {
+            if (this.masterUrl) {
+                await this.syncFromMaster(this.masterUrl);
+            } else {
+                throw e;
+            }
+        }
+    }
+
+    async syncFromMaster(masterUrl) {
+        const response = await fetch(`${masterUrl.replace(/\/$/, '')}/api/snapshot`);
+        if (!response.ok) {
+            throw new Error('Failed to sync from master');
+        }
+        const snapshot = await response.json();
+        this.applySnapshot(snapshot);
+        await this.saveSnapshot();
+    }
+
+    applySnapshot(snapshot) {
+        this.capsules.clear();
+        this.accounts.clear();
+        this.accountIndex.clear();
+        this.ledger = [];
+        this.escrows.clear();
+        for (const capsule of snapshot.capsules || []) {
+            if (capsule && capsule.asset_id) {
+                this.capsules.set(capsule.asset_id, capsule);
+            }
+        }
+        for (const account of snapshot.accounts || []) {
+            if (account && account.accountId) {
+                this.accounts.set(account.accountId, account);
+            }
+        }
+        for (const entry of snapshot.accountIndex || []) {
+            if (entry && entry.nodeId && entry.accountId) {
+                this.accountIndex.set(entry.nodeId, entry.accountId);
+            }
+        }
+        this.ledger = this.normalizeLedger(snapshot.ledger || []);
+        for (const escrow of snapshot.escrows || []) {
+            if (escrow && escrow.taskId) {
+                this.escrows.set(escrow.taskId, escrow);
+            }
+        }
+    }
+
+    getSnapshot() {
+        return {
+            capsules: Array.from(this.capsules.values()).map(capsule => ({
+                ...capsule,
+                content: null
+            })),
+            accounts: Array.from(this.accounts.values()),
+            accountIndex: Array.from(this.accountIndex.entries()).map(([nodeId, accountId]) => ({ nodeId, accountId })),
+            ledger: this.ledger,
+            escrows: Array.from(this.escrows.values())
+        };
+    }
+
+    async saveSnapshot() {
+        await this.saveToDisk();
+        await this.saveAccountsToDisk();
+        await this.saveLedgerToDisk();
+        await this.saveEscrowsToDisk();
+    }
     
     async loadFromDisk() {
+        if (this.useLance && await this.loadFromLance()) {
+            return;
+        }
         const filePath = this.getCapsulesPath();
         if (fs.existsSync(filePath)) {
             try {
@@ -104,13 +290,16 @@ class MemoryStore {
             }
         }
 
-        this.verifyLedgerIntegrity();
     }
     
     async saveToDisk() {
         const filePath = this.getCapsulesPath();
         const data = Object.fromEntries(this.capsules);
         fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        await this.saveTable('capsules', Object.values(data).map(capsule => ({
+            ...capsule,
+            capsule_json: JSON.stringify(capsule)
+        })));
     }
 
     async saveAccountsToDisk() {
@@ -120,16 +309,38 @@ class MemoryStore {
             index: Object.fromEntries(this.accountIndex)
         };
         fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+        await this.saveTable('accounts', Object.entries(data.accounts).map(([accountId, account]) => ({
+            accountId,
+            nodeId: account.nodeId || '',
+            algorithm: account.algorithm || '',
+            seedHash: account.seedHash || '',
+            createdAt: account.createdAt || '',
+            importedAt: account.importedAt || '',
+            account_json: JSON.stringify(account)
+        })));
+        await this.saveTable('account_index', Object.entries(data.index).map(([nodeId, accountId]) => ({
+            nodeId,
+            accountId
+        })));
     }
 
     async saveLedgerToDisk() {
         const filePath = this.getLedgerPath();
         fs.writeFileSync(filePath, JSON.stringify(this.ledger, null, 2));
+        await this.saveTable('ledger', this.ledger.map(entry => ({
+            ...entry,
+            prevHash: entry.prevHash || '',
+            ledger_json: JSON.stringify(entry)
+        })));
     }
 
     async saveEscrowsToDisk() {
         const filePath = this.getEscrowPath();
         fs.writeFileSync(filePath, JSON.stringify(Object.fromEntries(this.escrows), null, 2));
+        await this.saveTable('escrows', Array.from(this.escrows.values()).map(escrow => ({
+            ...escrow,
+            escrow_json: JSON.stringify(escrow)
+        })));
     }
     
     // 存储胶囊
@@ -330,6 +541,12 @@ class MemoryStore {
 
     transfer(fromNodeId, toNodeId, amount, meta = {}) {
         if (amount <= 0) return { success: false, reason: 'Invalid amount' };
+        if (!this.isGenesisNode) {
+            throw new Error('Only genesis node can transfer');
+        }
+        if (fromNodeId !== this.genesisNodeId) {
+            throw new Error('Only genesis account can transfer');
+        }
         const fromAccount = this.ensureAccount(fromNodeId);
         const toAccount = this.ensureAccount(toNodeId);
         const balance = this.computeBalance(fromAccount.accountId);
@@ -371,6 +588,9 @@ class MemoryStore {
     }
 
     ensureGenesisAccount() {
+        if (!this.isGenesisNode) {
+            return;
+        }
         if (this.accountIndex.has(this.genesisNodeId)) {
             const accountId = this.accountIndex.get(this.genesisNodeId);
             const minted = this.ledger.some(entry => entry.type === 'mint' && entry.accountId === accountId);
@@ -399,7 +619,7 @@ class MemoryStore {
     }
 
     appendLedgerEntry(entry) {
-        const prevHash = this.getLedgerHeadHash() || null;
+        const prevHash = this.getLedgerHeadHash() || '';
         const index = this.ledger.length;
         const payload = {
             ...entry,
@@ -414,19 +634,20 @@ class MemoryStore {
     }
 
     getLedgerHeadHash() {
-        if (this.ledger.length === 0) return null;
-        return this.ledger[this.ledger.length - 1].hash || null;
+        if (this.ledger.length === 0) return '';
+        return this.ledger[this.ledger.length - 1].hash || '';
     }
 
     normalizeLedger(entries = []) {
         const normalized = [];
-        let prevHash = null;
-        for (let i = 0; i < entries.length; i += 1) {
-            const entry = { ...entries[i] };
+        let prevHash = '';
+        for (const raw of entries) {
+            if (raw && raw._empty) continue;
+            const entry = { ...raw };
             const payload = {
                 ...entry,
-                index: i,
-                prevHash,
+                index: normalized.length,
+                prevHash: prevHash || '',
                 timestamp: entry.timestamp || Date.now()
             };
             delete payload.hash;
@@ -438,14 +659,14 @@ class MemoryStore {
     }
 
     verifyLedgerIntegrity() {
-        let prevHash = null;
+        let prevHash = '';
         for (let i = 0; i < this.ledger.length; i += 1) {
             const entry = this.ledger[i];
             const { hash, ...payload } = entry;
             if (payload.index !== i) {
                 throw new Error('Ledger integrity check failed');
             }
-            if (payload.prevHash !== prevHash) {
+            if ((payload.prevHash || '') !== prevHash) {
                 throw new Error('Ledger integrity check failed');
             }
             const expected = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
