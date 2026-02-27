@@ -1089,19 +1089,19 @@ class WebUIServer {
         
         async function refreshData() {
             try {
-                const status = await fetch('/api/status').then(r => r.json());
+                const status = await fetchWithTimeout('/api/status').then(r => r.json());
                 updateUI(status);
                 
-                const memories = await fetch('/api/memories').then(r => r.json());
+                const memories = await fetchWithTimeout('/api/memories').then(r => r.json());
                 updateMemories(memories);
                 
-                const tasks = await fetch('/api/tasks').then(r => r.json());
+                const tasks = await fetchWithTimeout('/api/tasks').then(r => r.json());
                 updateTasks(tasks);
                 
-                const stats = await fetch('/api/stats').then(r => r.json());
+                const stats = await fetchWithTimeout('/api/stats').then(r => r.json());
                 updateStats(stats);
 
-                const account = await fetch('/api/account').then(r => r.json());
+                const account = await fetchWithTimeout('/api/account').then(r => r.json());
                 updateAccount(account);
             } catch (e) {
                 console.error('Failed to refresh:', e);
@@ -1432,6 +1432,13 @@ class WebUIServer {
         }, 15000);
         refreshData();
         setInterval(refreshData, 30000);
+
+        function fetchWithTimeout(url, options = {}, timeoutMs = 8000) {
+            const controller = new AbortController();
+            const id = setTimeout(() => controller.abort(), timeoutMs);
+            const opts = Object.assign({}, options, { signal: controller.signal });
+            return fetch(url, opts).finally(() => clearTimeout(id));
+        }
     </script>
 </body>
 </html>`;

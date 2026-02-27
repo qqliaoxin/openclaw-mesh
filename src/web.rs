@@ -104,6 +104,8 @@ async fn ws_handler(State(state): State<AppState>, ws: WebSocketUpgrade) -> impl
 async fn handle_ws(mut socket: WebSocket, state: AppState) {
     let mut status_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     let mut ping_tick = tokio::time::interval(std::time::Duration::from_secs(20));
+    let initial = build_status(&state).await;
+    let _ = socket.send(Message::Text(initial.to_string())).await;
     loop {
         tokio::select! {
             _ = status_tick.tick() => {
@@ -119,6 +121,14 @@ async fn handle_ws(mut socket: WebSocket, state: AppState) {
             }
             msg = socket.recv() => {
                 match msg {
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(Message::Text(text))) => {
+                        if text.contains("\"type\":\"ping\"") || text.contains("\"type\": \"ping\"") {
+                            let _ = socket.send(Message::Text(serde_json::json!({"type":"pong","ts": chrono::Utc::now().timestamp_millis()}).to_string())).await;
+                        }
+                    }
                     Some(Ok(_)) => {}
                     _ => break,
                 }
