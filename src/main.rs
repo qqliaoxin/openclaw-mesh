@@ -27,7 +27,7 @@ struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -60,7 +60,7 @@ enum Commands {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
-    match cli.command {
+    match cli.command.unwrap_or(Commands::Start) {
         Commands::Init {
             name,
             port,
