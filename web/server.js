@@ -67,6 +67,21 @@ class WebUIServer {
         
         if (url === '/api/status') {
             data = this.mesh ? this.mesh.getStats() : { error: 'Mesh not initialized' };
+        } else if (url.startsWith('/api/account/balance')) {
+            const query = url.split('?')[1] || '';
+            const params = new URLSearchParams(query);
+            const accountId = params.get('accountId') || params.get('acct');
+            if (!accountId) {
+                data = { error: 'Missing accountId' };
+            } else if (this.mesh) {
+                data = {
+                    accountId,
+                    balance: this.mesh.ledger?.getBalance(accountId) || 0,
+                    nonce: this.mesh.ledger?.getNonce(accountId) || 0
+                };
+            } else {
+                data = { error: 'Mesh not initialized' };
+            }
         } else if (url === '/api/account') {
             if (this.mesh) {
                 const accountId = this.mesh.wallet?.accountId;
@@ -1413,6 +1428,8 @@ class WebUIServer {
                         <tr>
                             <th>Seq</th>
                             <th>Tx ID</th>
+                            <th>From</th>
+                            <th>To</th>
                             <th>Type</th>
                             <th>Amount</th>
                             <th>Confirmations</th>
@@ -1890,7 +1907,7 @@ class WebUIServer {
             const tbody = document.querySelector('#txHistoryTable tbody');
             if (!tbody) return;
             if (!items || items.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5">No transactions</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7">No transactions</td></tr>';
                 return;
             }
             const filtered = items.filter(tx => {
@@ -1901,15 +1918,20 @@ class WebUIServer {
                 if (Number.isFinite(txFilters.max) && amt > txFilters.max) return false;
                 return true;
             });
-            tbody.innerHTML = (filtered.length ? filtered : items).map(tx =>
-                '<tr>'
+            const rows = (filtered.length ? filtered : items).map(tx => {
+                const from = tx.from || '-';
+                const to = tx.to || '-';
+                return '<tr>'
                 + '<td>' + tx.seq + '</td>'
                 + '<td><a href="#" onclick="openTxStatus(\\'' + tx.txId + '\\');return false;">' + tx.txId.slice(0, 8) + '...</a></td>'
+                + '<td style="font-family:monospace;font-size:12px;">' + String(from).slice(0, 10) + '...</td>'
+                + '<td style="font-family:monospace;font-size:12px;">' + String(to).slice(0, 10) + '...</td>'
                 + '<td>' + tx.type + '</td>'
                 + '<td>' + tx.amount + '</td>'
                 + '<td>' + (tx.confirmations || 0) + '</td>'
-                + '</tr>'
-            ).join('');
+                + '</tr>';
+            });
+            tbody.innerHTML = rows.join('');
         }
 
         function updateFees(stats) {

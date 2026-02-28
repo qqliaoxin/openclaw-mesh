@@ -179,6 +179,15 @@ class MeshNode extends EventEmitter {
                 if (line.trim()) {
                     try {
                         const message = JSON.parse(line);
+                        if (message.type === 'handshake' && message.nodeId) {
+                            peerId = message.nodeId;
+                            const socket = this.peers.get(remoteKey);
+                            if (socket) {
+                                this.peers.delete(remoteKey);
+                                this.peers.set(peerId, socket);
+                                console.log(`✅ handshake mapped socket for ${peerId} (inbound)`);
+                            }
+                        }
                         this.handleMessage(message, peerId || remoteKey);
                     } catch (e) {
                         console.error('Invalid message:', e.message);
@@ -213,6 +222,14 @@ class MeshNode extends EventEmitter {
                 // Update socket mapping - replace old key with nodeId
                 const socket = this.peers.get(oldKey);
                 if (socket) {
+                    const existing = this.peers.get(peerId);
+                    if (existing && existing !== socket) {
+                        if (existing.writable && !existing.destroyed) {
+                            // Keep existing stable connection, close duplicate
+                            try { socket.destroy(); } catch (e) {}
+                            return;
+                        }
+                    }
                     this.peers.delete(oldKey);
                     this.peers.set(peerId, socket);
                     
@@ -228,11 +245,20 @@ class MeshNode extends EventEmitter {
             } else {
                 peerId = message.nodeId;
             }
+            const mapped = this.peers.get(peerId);
+            if (!mapped) {
+                console.log(`⚠️  handshake mapped but socket missing for ${peerId} (oldKey=${oldKey})`);
+            } else {
+                console.log(`✅ handshake mapped socket for ${peerId}`);
+            }
             this.emit('peer:connected', peerId);
         }
 
         if (!this.shouldProcessMessage(message)) {
             return;
+        }
+        if (message && (message.type === 'tx_log_request' || message.type === 'tx_log_batch')) {
+            console.log(`⬅️  recv ${message.type} from ${peerId}`);
         }
         
         const handler = this.messageHandlers.get(message.type);
@@ -271,6 +297,9 @@ class MeshNode extends EventEmitter {
     
     async connectToPeer(address) {
         return new Promise((resolve, reject) => {
+            if (this.peers.has(address)) {
+                return resolve();
+            }
             const [host, port] = address.split(':');
             const socket = net.createConnection({ host, port: parseInt(port) }, () => {
                 // Store temporarily by address
@@ -323,18 +352,27 @@ class MeshNode extends EventEmitter {
     
     send(socket, message) {
         if (socket && !socket.destroyed && socket.writable) {
+            if (message && (message.type === 'tx_log_request' || message.type === 'tx_log_batch')) {
+                console.log(`➡️  send ${message.type} to ${socket.remoteAddress || 'peer'}:${socket.remotePort || ''}`);
+            }
             socket.write(JSON.stringify(message) + '\n');
         }
     }
     
     sendToPeer(peerId, message) {
-        const socket = this.peers.get(peerId);
+        const socket = this.peers.get(peerId) || this.getSocketForPeer(peerId);
         if (socket && !socket.destroyed) {
+            if (!socket.writable) {
+                console.log(`⚠️  peer socket not writable: ${peerId}`);
+                return false;
+            }
             this.send(socket, message);
-        } else {
-            // Clean up stale peer
-            this.peers.delete(peerId);
+            return true;
         }
+        console.log(`⚠️  missing peer socket: ${peerId}`);
+        // Clean up stale peer
+        this.peers.delete(peerId);
+        return false;
     }
     
     // 广播胶囊到所有peer
@@ -461,13 +499,12 @@ class MeshNode extends EventEmitter {
     getPeers() {
         const peers = [];
         for (const [peerId, socket] of this.peers) {
-            if (peerId.startsWith('node_')) {
-                peers.push({
-                    nodeId: peerId,
-                    ip: socket.remoteAddress ? socket.remoteAddress.replace('::ffff:', '') : 'unknown',
-                    connectedAt: Date.now()
-                });
-            }
+            const id = peerId;
+            peers.push({
+                nodeId: id,
+                ip: socket.remoteAddress ? socket.remoteAddress.replace('::ffff:', '') : 'unknown',
+                connectedAt: Date.now()
+            });
         }
         return peers;
     }

@@ -87,3 +87,15 @@ Dashboard 显示
 
 Stats 中显示评分、规则
 Task 列表新增 “Like” 列，完成任务可以点赞（一次）
+
+打开主节点的 UI → Transactions，找到那笔转账的 txId，然后直接访问：
+
+http://localhost:3457/api/tx/status?txId=你的txId
+
+转账是否真正写入主账本
+用主节点访问：
+http://localhost:3457/api/tx/recent?limit=20
+
+快速查余额接口：
+
+http://localhost:3457/api/account/balance?accountId=acct_xxx

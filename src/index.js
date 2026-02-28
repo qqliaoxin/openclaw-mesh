@@ -55,6 +55,8 @@ class OpenClawMesh {
         this.wallet = null;
         this.ratingStore = null;
         this.initialized = false;
+        this.pendingTxs = new Map();
+        this.pendingTxInterval = null;
     }
     
     generateNodeId() {
@@ -101,6 +103,7 @@ class OpenClawMesh {
 
         // 账本广播由主节点处理 tx -> tx_log
         this.startLedgerSync();
+        this.startPendingTxRelay();
         
         // 初始化任务市场
         this.taskBazaar = new TaskBazaar({
@@ -137,20 +140,56 @@ class OpenClawMesh {
         if (this.ledgerSyncInterval) {
             clearInterval(this.ledgerSyncInterval);
         }
+        let tickCount = 0;
         const request = () => {
             if (!this.node || !this.ledger) return;
+            if (this.options.isGenesisNode) return;
             const peers = this.node.getPeers();
             if (!peers || peers.length === 0) return;
+            tickCount += 1;
+            const forceFull = tickCount % 12 === 0; // roughly every 60s
+            const sinceSeq = forceFull ? 0 : this.ledger.getLastSeq();
+            console.log(`🔄 Ledger sync request: sinceSeq=${sinceSeq} peers=${peers.length}`);
             for (const peer of peers) {
-                this.node.sendToPeer(peer.nodeId, {
-                    type: 'ledger_head_request',
-                    payload: { lastSeq: this.ledger.getLastSeq() },
+                const ok = this.node.sendToPeer(peer.nodeId, {
+                    type: 'tx_log_request',
+                    payload: { sinceSeq },
                     timestamp: Date.now()
                 });
+                if (!ok) {
+                    console.log(`⚠️  Ledger sync send failed: ${peer.nodeId}`);
+                }
             }
         };
         setTimeout(request, 1000);
         this.ledgerSyncInterval = setInterval(request, 5000);
+    }
+
+    startPendingTxRelay() {
+        if (this.pendingTxInterval) {
+            clearInterval(this.pendingTxInterval);
+        }
+        const tick = () => {
+            if (!this.node || !this.ledger || this.options.isGenesisNode) return;
+            const now = Date.now();
+            for (const [txId, item] of this.pendingTxs.entries()) {
+                if (this.ledger.getTxById(txId)) {
+                    this.pendingTxs.delete(txId);
+                    continue;
+                }
+                if (item.nextRetryAt && now < item.nextRetryAt) {
+                    continue;
+                }
+                this.node.broadcastAll({
+                    type: 'tx',
+                    payload: item.tx,
+                    timestamp: Date.now()
+                });
+                item.attempts += 1;
+                item.nextRetryAt = now + Math.min(2000 * item.attempts, 15000);
+            }
+        };
+        this.pendingTxInterval = setInterval(tick, 2000);
     }
 
     importWallet(payload) {
@@ -304,11 +343,17 @@ class OpenClawMesh {
         // 监听节点连接
         this.node.on('peer:connected', (peerId) => {
             console.log(`🌐 Peer connected: ${peerId}`);
-            this.node.sendToPeer(peerId, {
-                type: 'ledger_head_request',
-                payload: { lastSeq: this.ledger.getLastSeq() },
-                timestamp: Date.now()
-            });
+            if (!this.options.isGenesisNode) {
+                console.log(`🔄 Ledger sync request (on connect): sinceSeq=0 -> ${peerId}`);
+                const ok = this.node.sendToPeer(peerId, {
+                    type: 'tx_log_request',
+                    payload: { sinceSeq: 0 },
+                    timestamp: Date.now()
+                });
+                if (!ok) {
+                    console.log(`⚠️  Ledger sync send failed (on connect): ${peerId}`);
+                }
+            }
         });
         
         // 监听节点断开
@@ -346,6 +391,9 @@ class OpenClawMesh {
         this.node.on('tx:log', (entry) => {
             if (!entry) return;
             this.ledger.applyLogEntry(entry);
+            if (entry.txId) {
+                this.pendingTxs.delete(entry.txId);
+            }
             if (this.taskBazaar?.tryActivatePendingTasks) {
                 this.taskBazaar.tryActivatePendingTasks();
             }
@@ -355,9 +403,14 @@ class OpenClawMesh {
         this.node.on('tx:log_request', (payload, peerId) => {
             const sinceSeq = Number(payload?.sinceSeq || 0);
             const limit = Number(payload?.limit || 500);
+            console.log(`📥 tx_log_request from ${peerId} sinceSeq=${sinceSeq} limit=${limit}`);
             const entries = this.ledger.getTxLogSince(sinceSeq, limit);
-            if (entries.length === 0) return;
+            if (entries.length === 0) {
+                console.log(`📤 tx_log_batch -> ${peerId} sinceSeq=${sinceSeq} count=0`);
+                return;
+            }
             const lastSeq = entries[entries.length - 1]?.seq || sinceSeq;
+            console.log(`📤 tx_log_batch -> ${peerId} sinceSeq=${sinceSeq} count=${entries.length} lastSeq=${lastSeq}`);
             this.node.sendToPeer(peerId, {
                 type: 'tx_log_batch',
                 payload: { entries, lastSeq, hasMore: entries.length >= limit },
@@ -368,8 +421,16 @@ class OpenClawMesh {
         // 监听账本批量同步
         this.node.on('tx:log_batch', (payload, peerId) => {
             const entries = payload?.entries || [];
+            if (entries.length > 0) {
+                const firstSeq = entries[0]?.seq;
+                const lastSeq = entries[entries.length - 1]?.seq;
+                console.log(`📥 tx_log_batch from ${peerId} count=${entries.length} seq=${firstSeq}..${lastSeq}`);
+            }
             for (const entry of entries) {
                 this.ledger.applyLogEntry(entry);
+                if (entry?.txId) {
+                    this.pendingTxs.delete(entry.txId);
+                }
             }
             if (payload?.hasMore && Number.isFinite(payload?.lastSeq)) {
                 this.node.sendToPeer(peerId, {
@@ -395,31 +456,7 @@ class OpenClawMesh {
             });
         });
 
-        this.node.on('ledger:head_response', (payload, peerId) => {
-            if (!payload) return;
-            const remoteSeq = Number(payload.lastSeq || 0);
-            const remoteHash = payload.headHash || '';
-            const localSeq = this.ledger.getLastSeq();
-            const localHash = this.ledger.getHeadHash();
-            if (remoteSeq === localSeq && remoteHash === localHash) {
-                return;
-            }
-            if (remoteSeq > localSeq) {
-                this.node.sendToPeer(peerId, {
-                    type: 'tx_log_request',
-                    payload: { sinceSeq: localSeq },
-                    timestamp: Date.now()
-                });
-                return;
-            }
-            if (remoteSeq === localSeq && remoteHash !== localHash) {
-                this.node.sendToPeer(peerId, {
-                    type: 'tx_log_request',
-                    payload: { sinceSeq: 0 },
-                    timestamp: Date.now()
-                });
-            }
-        });
+        // ledger_head_* handlers are no longer used in forced tx_log sync mode.
     }
     
     createSignedTransfer(toAccountId, amount) {
@@ -533,6 +570,7 @@ class OpenClawMesh {
             payload: tx,
             timestamp: Date.now()
         });
+        this.pendingTxs.set(tx.txId, { tx, attempts: 0, nextRetryAt: Date.now() + 1500 });
         return { submitted: true, txId: tx.txId };
     }
 
@@ -778,6 +816,9 @@ class OpenClawMesh {
         }
         if (this.ledgerSyncInterval) {
             clearInterval(this.ledgerSyncInterval);
+        }
+        if (this.pendingTxInterval) {
+            clearInterval(this.pendingTxInterval);
         }
         
         console.log('✅ OpenClaw Mesh stopped');
