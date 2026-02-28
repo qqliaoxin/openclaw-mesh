@@ -1032,6 +1032,7 @@ class WebUIServer {
                             <th data-i18n="taskId">Task ID</th>
                             <th data-i18n="description">Description</th>
                             <th data-i18n="bounty">Bounty</th>
+                            <th>Assigned Node</th>
                             <th data-i18n="status">Status</th>
                             <th>Like</th>
                         </tr>
@@ -1364,10 +1365,12 @@ class WebUIServer {
                 const voteBtns = t.status === 'completed'
                     ? (t.voted ? '<span style="color:#7ee787">✔</span>' : '<button class="btn-small" onclick="voteTask(\\'' + t.taskId + '\\', 2)">👍 点赞</button> <button class="btn-small" onclick="voteTask(\\'' + t.taskId + '\\', -1)">👎 扣分</button>')
                     : '';
+                const assigned = t.assignedTo || t.completedBy || t.winner || t.result?.nodeId || '-';
                 return '<tr>'
                     + '<td style="font-family:monospace;font-size:12px;">' + t.taskId.slice(0, 20) + '...</td>'
                     + '<td>' + t.description.slice(0, 40) + (t.description.length > 40 ? '...' : '') + '</td>'
                     + '<td>' + (t.bounty?.amount || 0) + ' ' + (t.bounty?.token || 'CLAW') + '</td>'
+                    + '<td style="font-family:monospace;font-size:12px;">' + (assigned ? String(assigned).slice(0, 16) + '...' : '-') + '</td>'
                     + '<td><span class="badge badge-' + badgeClass + '">' + statusText + '</span> ' + downloadBtn + '</td>'
                     + '<td>' + voteBtns + '</td>'
                     + '</tr>';
