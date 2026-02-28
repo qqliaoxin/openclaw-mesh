@@ -13,6 +13,7 @@ class TaskBazaar extends EventEmitter {
         this.memoryStore = options.memoryStore;
         this.ledger = options.ledger || null;
         this.walletAccountId = options.walletAccountId || null;
+        this.ratingStore = options.ratingStore || null;
         
         this.tasks = new Map(); // taskId -> task
         this.submissions = new Map(); // taskId -> [solutions]
@@ -199,6 +200,11 @@ class TaskBazaar extends EventEmitter {
             }
         }
         return { available, locked };
+    }
+
+    isNodeAllowed(nodeId) {
+        if (!this.ratingStore || !nodeId) return true;
+        return !this.ratingStore.isDisqualified(nodeId);
     }
 
     isEscrowFunded(task) {

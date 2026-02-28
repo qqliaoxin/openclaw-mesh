@@ -98,7 +98,15 @@ class WebUIServer {
         } else if (url === '/api/memories') {
             data = this.mesh ? this.sanitizeCapsules(this.mesh.memoryStore.queryCapsules({ limit: 50 })) : [];
         } else if (url === '/api/tasks') {
-            data = this.mesh ? this.mesh.taskBazaar.getTasks() : [];
+            if (this.mesh) {
+                const tasks = this.mesh.taskBazaar.getTasks();
+                data = tasks.map(t => ({
+                    ...t,
+                    liked: this.mesh.ratingStore?.hasLike?.(t.taskId) || false
+                }));
+            } else {
+                data = [];
+            }
         } else if (url === '/api/peers') {
             data = this.mesh ? this.mesh.node.getPeers() : [];
         } else if (url.startsWith('/api/memory/')) {
@@ -106,13 +114,17 @@ class WebUIServer {
             data = this.mesh ? this.sanitizeCapsule(this.mesh.memoryStore.getCapsule(assetId)) : null;
         } else if (url === '/api/stats') {
             const platformAccountId = this.mesh?.getPlatformAccountId?.();
+            const rating = this.mesh?.ratingStore?.getNode?.(this.mesh?.options?.nodeId) || null;
+            const ratingRules = this.mesh?.ratingStore?.getRules?.() || null;
             data = {
                 memories: this.mesh ? this.mesh.memoryStore.getStats() : {},
                 tasks: this.mesh ? this.mesh.taskBazaar.getStats() : {},
                 balance: this.mesh ? this.mesh.taskBazaar.getBalance() : {},
                 platformBalance: platformAccountId ? (this.mesh.ledger?.getBalance(platformAccountId) || 0) : 0,
                 taskPublishFee: this.mesh?.options?.taskPublishFee || 0,
-                capsulePublishFee: this.mesh?.options?.capsulePublishFee || 0
+                capsulePublishFee: this.mesh?.options?.capsulePublishFee || 0,
+                rating,
+                ratingRules
             };
         } else if (url.startsWith('/api/tx/status')) {
             const query = url.split('?')[1] || '';
@@ -234,6 +246,42 @@ class WebUIServer {
                         data = { success: true, task, taskId: taskId.taskId || taskId, txReceipts: taskId.txReceipts || [] };
                     } else {
                         data = { error: 'Mesh not initialized' };
+                    }
+                } catch (e) {
+                    data = { error: e.message };
+                }
+                res.writeHead(200);
+                res.end(JSON.stringify(data));
+            });
+            return;
+        } else if (url === '/api/task/like' && req.method === 'POST') {
+            let body = '';
+            req.on('data', chunk => body += chunk);
+            req.on('end', async () => {
+                try {
+                    const payload = JSON.parse(body || '{}');
+                    if (!this.mesh) {
+                        data = { error: 'Mesh not initialized' };
+                    } else {
+                        const task = this.mesh.taskBazaar.getTask(payload.taskId);
+                        const winnerNodeId = task?.completedBy || task?.winner;
+                        if (!task || task.status !== 'completed' || !winnerNodeId) {
+                            data = { error: 'Task not eligible for like' };
+                        } else {
+                            const likedBy = payload.likedBy || this.mesh.options.nodeId;
+                            const result = this.mesh.ratingStore.addLike(task.taskId, winnerNodeId, likedBy);
+                            if (result.ok) {
+                                if (this.mesh.node && this.mesh.node.broadcast) {
+                                    this.mesh.node.broadcast({
+                                        type: 'task_like',
+                                        payload: { taskId: task.taskId, winnerNodeId, likedBy }
+                                    });
+                                }
+                                data = { success: true };
+                            } else {
+                                data = { error: result.reason || 'Already liked' };
+                            }
+                        }
                     }
                 } catch (e) {
                     data = { error: e.message };
@@ -980,6 +1028,7 @@ class WebUIServer {
                             <th data-i18n="description">Description</th>
                             <th data-i18n="bounty">Bounty</th>
                             <th data-i18n="status">Status</th>
+                            <th>Like</th>
                         </tr>
                     </thead>
                     <tbody></tbody>
@@ -1096,6 +1145,11 @@ class WebUIServer {
                 <div id="detailedStats"></div>
                 <div style="margin-top:16px;">
                     <button class="btn" onclick="openTxModal()">Tx Status</button>
+                </div>
+                <div style="margin-top:20px;">
+                    <h3>Node Rating</h3>
+                    <div id="ratingInfo"></div>
+                    <div id="ratingRules" style="margin-top:10px;color:#9fb0c4;"></div>
                 </div>
                 <div style="margin-top:16px;">
                     <h3>Tx Confirm Config</h3>
@@ -1287,21 +1341,28 @@ class WebUIServer {
         
         function updateTasks(tasks) {
             const tbody = document.querySelector('#tasksTable tbody');
-            tbody.innerHTML = tasks.slice(0, 10).map(t => \`
-                <tr>
-                    <td style="font-family:monospace;font-size:12px;">\${t.taskId.slice(0, 20)}...</td>
-                    <td>\${t.description.slice(0, 40)}\${t.description.length > 40 ? '...' : ''}</td>
-                    <td>\${t.bounty?.amount || 0} \${t.bounty?.token || 'CLAW'}</td>
-                    <td>
-                        <span class="badge badge-\${t.status === 'completed' ? 'success' : (t.status === 'working' ? 'info' : 'pending')}">
-                            \${t.status === 'completed' ? (currentLang === 'zh' ? '已完成' : t.status) : 
-                              t.status === 'working' ? (currentLang === 'zh' ? '处理中' : t.status) : 
-                              (currentLang === 'zh' ? '开放' : t.status)}
-                        </span>
-                        \${t.status === 'completed' ? \`<button class="btn-small" onclick="downloadTask('\${t.taskId}')">⬇ \${currentLang === 'zh' ? '下载' : 'Download'}</button>\` : ''}
-                    </td>
-                </tr>
-            \`).join('');
+            const rows = tasks.slice(0, 10).map(t => {
+                const statusText = t.status === 'completed'
+                    ? (currentLang === 'zh' ? '已完成' : t.status)
+                    : t.status === 'working'
+                        ? (currentLang === 'zh' ? '处理中' : t.status)
+                        : (currentLang === 'zh' ? '开放' : t.status);
+                const badgeClass = t.status === 'completed' ? 'success' : (t.status === 'working' ? 'info' : 'pending');
+                const downloadBtn = t.status === 'completed'
+                    ? '<button class="btn-small" onclick="downloadTask(\\'' + t.taskId + '\\')">⬇ ' + (currentLang === 'zh' ? '下载' : 'Download') + '</button>'
+                    : '';
+                const likeBtn = t.status === 'completed'
+                    ? (t.liked ? '<span style="color:#7ee787">✔</span>' : '<button class="btn-small" onclick="likeTask(\\'' + t.taskId + '\\')">👍</button>')
+                    : '';
+                return '<tr>'
+                    + '<td style="font-family:monospace;font-size:12px;">' + t.taskId.slice(0, 20) + '...</td>'
+                    + '<td>' + t.description.slice(0, 40) + (t.description.length > 40 ? '...' : '') + '</td>'
+                    + '<td>' + (t.bounty?.amount || 0) + ' ' + (t.bounty?.token || 'CLAW') + '</td>'
+                    + '<td><span class="badge badge-' + badgeClass + '">' + statusText + '</span> ' + downloadBtn + '</td>'
+                    + '<td>' + likeBtn + '</td>'
+                    + '</tr>';
+            });
+            tbody.innerHTML = rows.join('');
         }
 
         function updateAccount(account) {
@@ -1553,6 +1614,29 @@ class WebUIServer {
                 <p>Locked: \${stats.balance.locked || 0}</p>
                 <p>Platform Balance: \${stats.platformBalance || 0}</p>
             \`;
+            const rating = stats.rating || {};
+            const info = [
+                'Score: ' + (rating.score !== undefined ? rating.score : 0),
+                'Completed: ' + (rating.completed !== undefined ? rating.completed : 0),
+                'Failed: ' + (rating.failed !== undefined ? rating.failed : 0),
+                'Likes: ' + (rating.likes !== undefined ? rating.likes : 0),
+                'EWMA: ' + Math.round(rating.ewma || 0)
+            ].join('<br>');
+            document.getElementById('ratingInfo').innerHTML = info;
+            const rules = stats.ratingRules || {};
+            if (rules && Object.keys(rules).length > 0) {
+                const rulesText = [
+                    'EWMA alpha: ' + (rules.alpha !== undefined ? rules.alpha : '-'),
+                    'Target ms: ' + (rules.targetMs !== undefined ? rules.targetMs : '-'),
+                    'Max speed score: ' + (rules.maxSpeedScore !== undefined ? rules.maxSpeedScore : 10000),
+                    'Points per task: ' + (rules.pointsPerTask !== undefined ? rules.pointsPerTask : 2),
+                    'Penalty per fail: ' + (rules.penaltyPerFail !== undefined ? rules.penaltyPerFail : 10),
+                    'Like points: ' + (rules.likePoints !== undefined ? rules.likePoints : 1),
+                    'Min tasks to enforce: ' + (rules.minTasks !== undefined ? rules.minTasks : 10),
+                    'Disqualify threshold: ' + (rules.threshold !== undefined ? rules.threshold : 10)
+                ].join('<br>');
+                document.getElementById('ratingRules').innerHTML = rulesText;
+            }
         }
 
         function updateTxHistory(items) {
@@ -1623,6 +1707,24 @@ class WebUIServer {
             document.getElementById('txStatusResult').innerHTML = '<span>Checking...</span>';
             await update();
             txStatusInterval = setInterval(update, 1000);
+        }
+
+        async function likeTask(taskId) {
+            try {
+                const res = await fetch('/api/task/like', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ taskId })
+                });
+                const data = await res.json();
+                if (!data.success) {
+                    alert(data.error || 'Like failed');
+                    return;
+                }
+                refreshData();
+            } catch (e) {
+                alert(e.message);
+            }
         }
 
         function applyTxFilters() {

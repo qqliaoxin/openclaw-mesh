@@ -11,6 +11,7 @@ const TaskWorker = require('./task-worker');
 const LedgerStore = require('./ledger-store');
 const { loadOrCreateWallet, signPayload, accountIdFromPublicKey } = require('./wallet');
 const crypto = require('crypto');
+const RatingStore = require('./rating-store');
 const fs = require('fs').promises;
 const path = require('path');
 
@@ -52,6 +53,7 @@ class OpenClawMesh {
         this.webUI = null;
         this.ledger = null;
         this.wallet = null;
+        this.ratingStore = null;
         this.initialized = false;
     }
     
@@ -81,6 +83,13 @@ class OpenClawMesh {
             genesisPublicKeyPem: this.wallet.publicKeyPem,
             genesisPrivateKeyPem: this.wallet.privateKeyPem
         });
+        this.ratingStore = new RatingStore(this.options.dataDir, {
+            alpha: 0.2,
+            targetMs: 30 * 60 * 1000,
+            minTasks: 10,
+            threshold: 10
+        });
+        this.ratingStore.init();
         
         // 初始化P2P节点
         this.node = new MeshNode({
@@ -97,7 +106,8 @@ class OpenClawMesh {
             nodeId: this.options.nodeId,
             memoryStore: this.memoryStore,
             ledger: this.ledger,
-            walletAccountId: this.wallet.accountId
+            walletAccountId: this.wallet.accountId,
+            ratingStore: this.ratingStore
         });
         
         // 初始化任务处理器 (自动争单)
@@ -197,6 +207,14 @@ class OpenClawMesh {
                         completedAt: result?.completedAt || Date.now(),
                         result
                     });
+                    const task = this.taskBazaar.getTask(taskId);
+                    const assignedAt = task?.assignedAt ? Number(task.assignedAt) : null;
+                    const completedAtRaw = result?.completedAt || Date.now();
+                    const completedAt = Number(completedAtRaw) || Date.parse(completedAtRaw) || Date.now();
+                    if (assignedAt && completedAt && completedAt >= assignedAt) {
+                        const duration = completedAt - assignedAt;
+                        this.ratingStore?.recordCompletion(nodeId, duration);
+                    }
                 }
                 if (taskId && nodeId && taskPackage?.data) {
                     const completedBasePath = path.join(path.resolve(__dirname, '..'), 'task-workspace', 'completed');
@@ -209,6 +227,31 @@ class OpenClawMesh {
                 }
             } catch (err) {
                 console.error('Error handling task:completed:', err.message);
+            }
+        });
+
+        this.node.on('task:failed', async (payload) => {
+            try {
+                if (!payload) return;
+                const { taskId, nodeId } = payload;
+                if (taskId) {
+                    this.taskBazaar.updateTask(taskId, { status: 'failed' });
+                }
+                if (nodeId) {
+                    this.ratingStore?.recordFailure(nodeId);
+                }
+            } catch (err) {
+                console.error('Error handling task:failed:', err.message);
+            }
+        });
+
+        this.node.on('task:like', async (payload) => {
+            try {
+                const { taskId, winnerNodeId, likedBy } = payload || {};
+                if (!taskId || !winnerNodeId) return;
+                this.ratingStore?.addLike(taskId, winnerNodeId, likedBy);
+            } catch (err) {
+                console.error('Error handling task:like:', err.message);
             }
         });
         
@@ -635,6 +678,10 @@ class OpenClawMesh {
 
         if (this.ledger) {
             this.ledger.close();
+        }
+
+        if (this.ratingStore) {
+            this.ratingStore.close();
         }
 
         if (this.syncInterval) {

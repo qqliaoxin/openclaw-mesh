@@ -60,6 +60,9 @@ class TaskWorker {
     }
 
     async submitBid(task) {
+        if (this.mesh?.ratingStore?.isDisqualified(this.nodeId)) {
+            return;
+        }
         // Mark as bidding to avoid duplicate bids
         this.biddingTasks.set(task.taskId, {
             bidTime: Date.now(),
@@ -153,9 +156,11 @@ class TaskWorker {
 
     determineWinner(task) {
         if (!task.bids || task.bids.length === 0) return null;
+        const allowedBids = task.bids.filter(b => this.mesh?.ratingStore ? !this.mesh.ratingStore.isDisqualified(b.nodeId) : true);
+        if (allowedBids.length === 0) return null;
         
         // Sort by amount (lowest wins), then by timestamp (earliest wins)
-        const sortedBids = [...task.bids].sort((a, b) => {
+        const sortedBids = [...allowedBids].sort((a, b) => {
             if (a.amount !== b.amount) return a.amount - b.amount;
             return a.timestamp - b.timestamp;
         });
@@ -828,6 +833,18 @@ All required outputs have been generated and validated.
             this.mesh.taskBazaar.updateTask(taskId, { 
                 status: 'failed', 
                 error 
+            });
+        }
+
+        if (this.mesh?.node && this.mesh.node.broadcast) {
+            this.mesh.node.broadcast({
+                type: 'task_failed',
+                payload: {
+                    taskId,
+                    nodeId: this.nodeId,
+                    error,
+                    failedAt: Date.now()
+                }
             });
         }
     }

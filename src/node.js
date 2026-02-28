@@ -51,8 +51,17 @@ class MeshNode extends EventEmitter {
             this.emit('task:completed', message.payload);
         });
 
+        // 处理任务失败通知
+        this.messageHandlers.set('task_failed', async (message, peerId) => {
+            this.emit('task:failed', message.payload);
+        });
+
         this.messageHandlers.set('task_assigned', async (message, peerId) => {
             this.emit('task:assigned', message.payload);
+        });
+        
+        this.messageHandlers.set('task_like', async (message, peerId) => {
+            this.emit('task:like', message.payload);
         });
         
         // 处理查询请求
