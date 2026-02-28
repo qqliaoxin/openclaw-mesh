@@ -18,6 +18,11 @@ function canonicalPayload(tx) {
     };
 }
 
+function nextHeadHash(prevHash, seq, txId) {
+    const input = `${prevHash || ''}:${seq}:${txId}`;
+    return sha256Hex(input);
+}
+
 class LedgerStore {
     constructor(dataDir) {
         this.dataDir = dataDir;
@@ -69,6 +74,9 @@ class LedgerStore {
                 });
                 this.appendAsMaster(mintTx);
             }
+        }
+        if (!this.getMeta('head_hash')) {
+            this.rebuildHeadHash();
         }
     }
 
@@ -138,6 +146,20 @@ class LedgerStore {
             VALUES (?, ?)
             ON CONFLICT(key) DO UPDATE SET value = excluded.value
         `).run(key, value || '');
+    }
+
+    getHeadHash() {
+        return this.getMeta('head_hash') || '';
+    }
+
+    rebuildHeadHash() {
+        const rows = this.db.prepare('SELECT seq, tx_id as txId FROM tx_log ORDER BY seq ASC').all();
+        let head = '';
+        for (const row of rows) {
+            head = nextHeadHash(head, row.seq, row.txId);
+        }
+        this.setMeta('head_hash', head);
+        return head;
     }
 
     getTxLogSince(seq, limit = 500) {
@@ -267,6 +289,7 @@ class LedgerStore {
             null
         );
         this.applyToState(tx);
+        this.setMeta('head_hash', nextHeadHash(this.getMeta('head_hash'), seq, tx.txId));
         return { accepted: true, seq };
     }
 
@@ -313,6 +336,7 @@ class LedgerStore {
             null
         );
         this.applyToState(tx);
+        this.setMeta('head_hash', nextHeadHash(this.getMeta('head_hash'), entry.seq, entry.txId));
         return { applied: true };
     }
 

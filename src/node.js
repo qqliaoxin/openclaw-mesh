@@ -123,6 +123,16 @@ class MeshNode extends EventEmitter {
         this.messageHandlers.set('tx_log_batch', (message, peerId) => {
             this.emit('tx:log_batch', message.payload, peerId);
         });
+
+        // 处理账本头hash请求
+        this.messageHandlers.set('ledger_head_request', (message, peerId) => {
+            this.emit('ledger:head_request', message.payload, peerId);
+        });
+
+        // 处理账本头hash响应
+        this.messageHandlers.set('ledger_head_response', (message, peerId) => {
+            this.emit('ledger:head_response', message.payload, peerId);
+        });
     }
     
     async init() {

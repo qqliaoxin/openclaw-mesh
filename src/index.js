@@ -100,6 +100,7 @@ class OpenClawMesh {
         await this.node.init();
 
         // 账本广播由主节点处理 tx -> tx_log
+        this.startLedgerSync();
         
         // 初始化任务市场
         this.taskBazaar = new TaskBazaar({
@@ -130,6 +131,26 @@ class OpenClawMesh {
         console.log(`   WebUI: http://localhost:${this.options.webPort}`);
         
         return this;
+    }
+
+    startLedgerSync() {
+        if (this.ledgerSyncInterval) {
+            clearInterval(this.ledgerSyncInterval);
+        }
+        const request = () => {
+            if (!this.node || !this.ledger) return;
+            const peers = this.node.getPeers();
+            if (!peers || peers.length === 0) return;
+            for (const peer of peers) {
+                this.node.sendToPeer(peer.nodeId, {
+                    type: 'ledger_head_request',
+                    payload: { lastSeq: this.ledger.getLastSeq() },
+                    timestamp: Date.now()
+                });
+            }
+        };
+        setTimeout(request, 1000);
+        this.ledgerSyncInterval = setInterval(request, 5000);
     }
 
     importWallet(payload) {
@@ -283,14 +304,11 @@ class OpenClawMesh {
         // 监听节点连接
         this.node.on('peer:connected', (peerId) => {
             console.log(`🌐 Peer connected: ${peerId}`);
-            if (!this.options.isGenesisNode) {
-                const lastSeq = this.ledger.getLastSeq();
-                this.node.sendToPeer(peerId, {
-                    type: 'tx_log_request',
-                    payload: { sinceSeq: lastSeq },
-                    timestamp: Date.now()
-                });
-            }
+            this.node.sendToPeer(peerId, {
+                type: 'ledger_head_request',
+                payload: { lastSeq: this.ledger.getLastSeq() },
+                timestamp: Date.now()
+            });
         });
         
         // 监听节点断开
@@ -333,27 +351,73 @@ class OpenClawMesh {
             }
         });
 
-        // 监听账本同步请求（仅主节点响应）
+        // 监听账本同步请求（任意节点可响应）
         this.node.on('tx:log_request', (payload, peerId) => {
-            if (!this.options.isGenesisNode) return;
             const sinceSeq = Number(payload?.sinceSeq || 0);
-            const entries = this.ledger.getTxLogSince(sinceSeq);
+            const limit = Number(payload?.limit || 500);
+            const entries = this.ledger.getTxLogSince(sinceSeq, limit);
             if (entries.length === 0) return;
+            const lastSeq = entries[entries.length - 1]?.seq || sinceSeq;
             this.node.sendToPeer(peerId, {
                 type: 'tx_log_batch',
-                payload: { entries },
+                payload: { entries, lastSeq, hasMore: entries.length >= limit },
                 timestamp: Date.now()
             });
         });
-
+        
         // 监听账本批量同步
-        this.node.on('tx:log_batch', (payload) => {
+        this.node.on('tx:log_batch', (payload, peerId) => {
             const entries = payload?.entries || [];
             for (const entry of entries) {
                 this.ledger.applyLogEntry(entry);
             }
+            if (payload?.hasMore && Number.isFinite(payload?.lastSeq)) {
+                this.node.sendToPeer(peerId, {
+                    type: 'tx_log_request',
+                    payload: { sinceSeq: Number(payload.lastSeq) },
+                    timestamp: Date.now()
+                });
+            }
             if (this.taskBazaar?.tryActivatePendingTasks) {
                 this.taskBazaar.tryActivatePendingTasks();
+            }
+        });
+
+        this.node.on('ledger:head_request', (payload, peerId) => {
+            this.node.sendToPeer(peerId, {
+                type: 'ledger_head_response',
+                payload: {
+                    headHash: this.ledger.getHeadHash(),
+                    lastSeq: this.ledger.getLastSeq(),
+                    isGenesis: !!this.options.isGenesisNode
+                },
+                timestamp: Date.now()
+            });
+        });
+
+        this.node.on('ledger:head_response', (payload, peerId) => {
+            if (!payload) return;
+            const remoteSeq = Number(payload.lastSeq || 0);
+            const remoteHash = payload.headHash || '';
+            const localSeq = this.ledger.getLastSeq();
+            const localHash = this.ledger.getHeadHash();
+            if (remoteSeq === localSeq && remoteHash === localHash) {
+                return;
+            }
+            if (remoteSeq > localSeq) {
+                this.node.sendToPeer(peerId, {
+                    type: 'tx_log_request',
+                    payload: { sinceSeq: localSeq },
+                    timestamp: Date.now()
+                });
+                return;
+            }
+            if (remoteSeq === localSeq && remoteHash !== localHash) {
+                this.node.sendToPeer(peerId, {
+                    type: 'tx_log_request',
+                    payload: { sinceSeq: 0 },
+                    timestamp: Date.now()
+                });
             }
         });
     }
@@ -711,6 +775,9 @@ class OpenClawMesh {
 
         if (this.syncInterval) {
             clearInterval(this.syncInterval);
+        }
+        if (this.ledgerSyncInterval) {
+            clearInterval(this.ledgerSyncInterval);
         }
         
         console.log('✅ OpenClaw Mesh stopped');
