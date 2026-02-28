@@ -430,10 +430,11 @@ async function accountCommand(subcommand, args, configPath = null) {
     const nodeId = config.nodeId;
     const dataDir = config.dataDir || './data';
     const algorithm = getArg(args, '--algorithm', 'gep-lite-v1');
+    const masterUrl = getArg(args, '--master') || config.masterUrl || null;
     const store = new MemoryStore(dataDir, {
         nodeId,
         isGenesisNode: config.isGenesisNode || false,
-        masterUrl: config.masterUrl || null,
+        masterUrl,
         genesisOperatorAccountId: config.genesisOperatorAccountId || null
     });
     await store.init();
