@@ -9,7 +9,7 @@ const TaskBazaar = require('./task-bazaar');
 const WebUIServer = require('../web/server');
 const TaskWorker = require('./task-worker');
 const LedgerStore = require('./ledger-store');
-const { loadOrCreateWallet, signPayload, accountIdFromPublicKey } = require('./wallet');
+const { loadOrCreateWallet, signPayload, accountIdFromPublicKey, importWallet } = require('./wallet');
 const crypto = require('crypto');
 const RatingStore = require('./rating-store');
 const fs = require('fs').promises;
@@ -130,6 +130,30 @@ class OpenClawMesh {
         console.log(`   WebUI: http://localhost:${this.options.webPort}`);
         
         return this;
+    }
+
+    importWallet(payload) {
+        if (!this.options?.dataDir) {
+            throw new Error('Missing dataDir for wallet import');
+        }
+        if (this.ledger && this.options.isGenesisNode) {
+            const masterPub = this.ledger.getMeta('master_pubkey');
+            const incomingPriv = payload?.account?.privateKeyPem || payload?.privateKeyPem || payload?.account?.privateKey;
+            if (masterPub && incomingPriv) {
+                const derivedPub = crypto.createPublicKey(crypto.createPrivateKey(incomingPriv)).export({ type: 'spki', format: 'pem' });
+                if (derivedPub !== masterPub) {
+                    throw new Error('Genesis wallet cannot be changed after initialization');
+                }
+            } else if (masterPub) {
+                throw new Error('Genesis wallet cannot be changed after initialization');
+            }
+        }
+        const wallet = importWallet(this.options.dataDir, payload);
+        this.wallet = wallet;
+        if (this.taskBazaar) {
+            this.taskBazaar.walletAccountId = wallet.accountId;
+        }
+        return wallet;
     }
 
     setupEventHandlers() {

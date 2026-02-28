@@ -88,6 +88,7 @@ class WebUIServer {
                     account: {
                         accountId,
                         publicKeyPem: this.mesh.wallet?.publicKeyPem || null,
+                        privateKeyPem: this.mesh.wallet?.privateKeyPem || null,
                         balance: this.mesh.ledger?.getBalance(accountId) || 0,
                         nonce: this.mesh.ledger?.getNonce(accountId) || 0
                     }
@@ -300,7 +301,22 @@ class WebUIServer {
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    data = { error: 'Account import disabled. Private keys never leave the node.' };
+                    const payload = JSON.parse(body || '{}');
+                    if (!this.mesh) {
+                        data = { error: 'Mesh not initialized' };
+                    } else {
+                        const wallet = this.mesh.importWallet(payload);
+                        const accountId = wallet.accountId;
+                        data = {
+                            success: true,
+                            account: {
+                                accountId,
+                                balance: this.mesh.ledger?.getBalance(accountId) || 0,
+                                nonce: this.mesh.ledger?.getNonce(accountId) || 0,
+                                publicKeyPem: wallet.publicKeyPem
+                            }
+                        };
+                    }
                 } catch (e) {
                     data = { error: e.message };
                 }
@@ -1093,7 +1109,7 @@ class WebUIServer {
                     repair: 'Repair', optimize: 'Optimize', innovate: 'Innovate', working: 'Working',
                     accountTab: 'Account', accountTitle: 'Account', accountId: 'Account ID', algorithm: 'Algorithm',
                     createdAt: 'Created At', accountBalance: 'Balance', exportAccount: 'Export Account',
-                    importAccount: 'Import Account', importHint: 'Paste JSON or choose file', chooseFile: 'Choose File',
+                    importAccount: 'Import Account', importHint: 'Paste exported JSON (keep it secret)', chooseFile: 'Choose File',
                     price: 'Price', action: 'Action', buy: 'Buy', capsulePrice: 'Price (CLAW):',
                     transfer: 'Transfer', toAccountId: 'To Account ID', amount: 'Amount', transferSubmit: 'Send'
                 },
@@ -1113,7 +1129,7 @@ class WebUIServer {
                     repair: '修复', optimize: '优化', innovate: '创新', working: '处理中',
                     accountTab: '账户', accountTitle: '账户信息', accountId: '账户ID', algorithm: '算法',
                     createdAt: '创建时间', accountBalance: '余额', exportAccount: '导出账户',
-                    importAccount: '导入账户', importHint: '粘贴JSON或选择文件', chooseFile: '选择文件',
+                    importAccount: '导入账户', importHint: '粘贴导出JSON（请保密）', chooseFile: '选择文件',
                     price: '价格', action: '操作', buy: '购买', capsulePrice: '价格 (CLAW)：',
                     transfer: '转账', toAccountId: '转入账户ID', amount: '金额', transferSubmit: '发送'
                 }
@@ -1619,6 +1635,10 @@ class WebUIServer {
                     document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + data.error + '</span>';
                     return;
                 }
+                if (!data.account || !data.account.privateKeyPem) {
+                    document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + (currentLang === 'zh' ? '导出缺少私钥，请重启节点后再试' : 'Export missing private key. Restart node and try again') + '</span>';
+                    return;
+                }
                 const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
                 const link = document.createElement('a');
@@ -1626,6 +1646,10 @@ class WebUIServer {
                 link.download = 'openclaw-account-backup.json';
                 link.click();
                 URL.revokeObjectURL(url);
+                const textInput = document.getElementById('accountJson');
+                if (textInput) {
+                    textInput.value = JSON.stringify(data, null, 2);
+                }
                 document.getElementById('accountResult').innerHTML = '<span style="color:green">✅ ' + (currentLang === 'zh' ? '账户已导出' : 'Account exported') + '</span>';
             } catch (e) {
                 document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + e.message + '</span>';

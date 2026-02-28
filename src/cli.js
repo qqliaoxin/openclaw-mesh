@@ -435,17 +435,18 @@ async function config() {
 async function accountCommand(subcommand, args, configPath = null) {
     const config = ensureNodeConfig(loadConfig(configPath));
     const dataDir = config.dataDir || './data';
-    const wallet = loadOrCreateWallet(dataDir);
-    const ledger = new LedgerStore(dataDir);
-    ledger.init({ isGenesis: config.isGenesisNode || false, genesisAccountId: wallet.accountId, genesisSupply: 1000000, genesisPublicKeyPem: wallet.publicKeyPem, genesisPrivateKeyPem: wallet.privateKeyPem });
     try {
         if (subcommand === 'export') {
+            const wallet = loadOrCreateWallet(dataDir);
+            const ledger = new LedgerStore(dataDir);
+            ledger.init({ isGenesis: config.isGenesisNode || false, genesisAccountId: wallet.accountId, genesisSupply: 1000000, genesisPublicKeyPem: wallet.publicKeyPem, genesisPrivateKeyPem: wallet.privateKeyPem });
             const payload = {
                 version: 2,
                 exportedAt: new Date().toISOString(),
                 account: {
                     accountId: wallet.accountId,
                     publicKeyPem: wallet.publicKeyPem,
+                    privateKeyPem: wallet.privateKeyPem,
                     balance: ledger.getBalance(wallet.accountId),
                     nonce: ledger.getNonce(wallet.accountId)
                 }
@@ -460,10 +461,22 @@ async function accountCommand(subcommand, args, configPath = null) {
             return;
         }
         if (subcommand === 'import') {
-            console.error('❌ Account import disabled. Private keys never leave the node.');
+            const filePath = args[0] || getArg(args, '--in') || getArg(args, '--file');
+            if (!filePath) {
+                console.error('❌ Missing import file. Usage: openclaw-mesh account import <file>');
+                return;
+            }
+            const raw = fs.readFileSync(path.resolve(filePath), 'utf8');
+            const payload = JSON.parse(raw);
+            const { importWallet } = require('./wallet');
+            const wallet = importWallet(dataDir, payload);
+            console.log(`✅ Account imported: ${wallet.accountId}`);
             return;
         }
         if (subcommand === 'transfer') {
+            const wallet = loadOrCreateWallet(dataDir);
+            const ledger = new LedgerStore(dataDir);
+            ledger.init({ isGenesis: config.isGenesisNode || false, genesisAccountId: wallet.accountId, genesisSupply: 1000000, genesisPublicKeyPem: wallet.publicKeyPem, genesisPrivateKeyPem: wallet.privateKeyPem });
             const toAccountIdRaw = getArg(args, '--to-account') || getArg(args, '--to');
             const amount = Number(getArg(args, '--amount'));
             const bootstrap = getArg(args, '--bootstrap');
