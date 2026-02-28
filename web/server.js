@@ -589,6 +589,89 @@ class WebUIServer {
             color: #fff;
             font-size: 14px;
         }
+
+        .filter-row input {
+            min-width: 160px;
+            flex: 1;
+        }
+
+        #accountDropzone {
+            transition: border-color 0.2s ease;
+        }
+
+        .tx-panel {
+            padding: 30px;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #1a2332 0%, #141b2a 100%);
+            border: 1px solid #2d3748;
+            margin-bottom: 30px;
+            width: 100%;
+            max-width: none;
+        }
+
+        .tx-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+
+        .tx-sub {
+            color: #9fb0c4;
+            font-size: 12px;
+            margin-top: 4px;
+        }
+
+        .tx-filters {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(160px, 1fr));
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .tx-filters input {
+            width: 100%;
+            padding: 10px 12px;
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 13px;
+        }
+
+        .tx-table-wrap {
+            width: 100%;
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid #2d3748;
+        }
+
+        .tx-table-wrap table {
+            margin: 0;
+        }
+
+        @media (max-width: 980px) {
+            .tx-filters {
+                grid-template-columns: 1fr 1fr;
+            }
+            .tx-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            .tx-panel {
+                width: 100%;
+            }
+        }
+
+        @media (max-width: 640px) {
+            .tx-filters {
+                grid-template-columns: 1fr;
+            }
+            .tx-panel {
+                width: 100%;
+            }
+        }
         
         .form-group input:focus,
         .form-group textarea:focus,
@@ -800,6 +883,7 @@ class WebUIServer {
             font-size: 20px;
         }
 
+
         /* Responsive + UI polish overrides */
         body {
             background: radial-gradient(1200px 600px at 20% -10%, rgba(0,212,255,0.12), transparent 60%),
@@ -808,7 +892,7 @@ class WebUIServer {
         }
 
         .container {
-            max-width: 1280px;
+            max-width: 1400px;
         }
 
         .stats-grid {
@@ -1078,6 +1162,7 @@ class WebUIServer {
             <button class="tab" onclick="switchTab('memories')" data-i18n="memoriesTab">Memories</button>
             <button class="tab" onclick="switchTab('tasks')" data-i18n="tasksTab">Tasks</button>
             <button class="tab" onclick="switchTab('publish')" data-i18n="publish">Publish</button>
+            <button class="tab" onclick="switchTab('transactions')">Transactions</button>
             <button class="tab" onclick="switchTab('account')" data-i18n="accountTab">Account</button>
             <button class="tab" onclick="switchTab('stats')" data-i18n="stats">Stats</button>
         </div>
@@ -1216,15 +1301,17 @@ class WebUIServer {
                         </tr>
                     </tbody>
                 </table>
-                <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
-                    <button class="btn" onclick="exportAccount()" data-i18n="exportAccount">Export Account</button>
-                    <input type="file" id="accountFile" accept="application/json" style="color:#fff;">
-                </div>
                 <div class="form-group" style="margin-top:16px;">
                     <label data-i18n="importHint">Paste JSON or choose file</label>
-                    <textarea id="accountJson" rows="4" placeholder="{ }"></textarea>
+                    <div id="accountDropzone" style="border:1px dashed #3b82f6;border-radius:10px;padding:14px;text-align:center;color:#9fb0c4;background:#0f172a;">
+                        Drag & drop account JSON here
+                    </div>
+                    <textarea id="accountJson" rows="4" placeholder="{ }" style="margin-top:10px;"></textarea>
                 </div>
                 <button class="btn" onclick="importAccount()" data-i18n="importAccount">Import Account</button>
+                <div style="margin-top:20px;display:flex;gap:12px;flex-wrap:wrap;">
+                    <button class="btn" onclick="exportAccount()" data-i18n="exportAccount">Export Account</button>
+                </div>
                 <div id="accountResult" style="margin-top: 10px;"></div>
             </div>
             <div class="card" style="margin-top:20px;">
@@ -1286,30 +1373,40 @@ class WebUIServer {
                     </div>
                     <div id="txConfigResult" style="margin-top:10px;"></div>
                 </div>
-                <div style="margin-top:20px;">
-                    <h3>Recent Transactions</h3>
-                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
-                        <input type="text" id="txFilterId" placeholder="Filter Tx ID">
-                        <input type="text" id="txFilterType" placeholder="Filter Type">
-                        <input type="number" id="txFilterMin" placeholder="Min Amount">
-                        <input type="number" id="txFilterMax" placeholder="Max Amount">
-                        <button class="btn" onclick="applyTxFilters()">Apply</button>
-                    </div>
-                    <table id="txHistoryTable">
-                        <thead>
-                            <tr>
-                                <th>Seq</th>
-                                <th>Tx ID</th>
-                                <th>Type</th>
-                                <th>Amount</th>
-                                <th>Confirmations</th>
-                            </tr>
-                        </thead>
-                        <tbody></tbody>
-                    </table>
-                </div>
             </div>
         </div>
+        
+        <div id="transactions" class="tab-content">
+        <div class="tx-panel">
+            <div class="tx-header">
+                <div>
+                    <h2>Recent Transactions</h2>
+                    <div class="tx-sub">Latest network ledger entries</div>
+                </div>
+                <button class="btn" onclick="applyTxFilters()">Apply</button>
+            </div>
+            <div class="tx-filters">
+                <input type="text" id="txFilterId" placeholder="Filter Tx ID">
+                <input type="text" id="txFilterType" placeholder="Filter Type">
+                <input type="number" id="txFilterMin" placeholder="Min Amount">
+                <input type="number" id="txFilterMax" placeholder="Max Amount">
+            </div>
+            <div class="tx-table-wrap">
+                <table id="txHistoryTable">
+                    <thead>
+                        <tr>
+                            <th>Seq</th>
+                            <th>Tx ID</th>
+                            <th>Type</th>
+                            <th>Amount</th>
+                            <th>Confirmations</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
     </div>
 
     <div id="txModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:999;">
@@ -1488,6 +1585,27 @@ class WebUIServer {
             document.getElementById('accountCreatedAt').textContent = account.createdAt || '-';
             document.getElementById('accountBalance').textContent = typeof account.balance === 'number' ? account.balance : '-';
         }
+
+        function initAccountDropzone() {
+            const dz = document.getElementById('accountDropzone');
+            const ta = document.getElementById('accountJson');
+            if (!dz || !ta) return;
+            dz.addEventListener('dragover', (e) => {
+                e.preventDefault();
+                dz.style.borderColor = '#38bdf8';
+            });
+            dz.addEventListener('dragleave', () => {
+                dz.style.borderColor = '#3b82f6';
+            });
+            dz.addEventListener('drop', async (e) => {
+                e.preventDefault();
+                dz.style.borderColor = '#3b82f6';
+                const file = e.dataTransfer.files && e.dataTransfer.files[0];
+                if (!file) return;
+                const text = await file.text();
+                ta.value = text;
+            });
+        }
         
         function downloadTask(taskId) {
             window.location.href = '/api/tasks/' + taskId + '/download';
@@ -1515,12 +1633,8 @@ class WebUIServer {
         }
 
         async function importAccount() {
-            const fileInput = document.getElementById('accountFile');
             const textInput = document.getElementById('accountJson');
             let payloadText = textInput.value.trim();
-            if (!payloadText && fileInput.files && fileInput.files[0]) {
-                payloadText = await fileInput.files[0].text();
-            }
             if (!payloadText) {
                 document.getElementById('accountResult').innerHTML = '<span style="color:red">❌ ' + (currentLang === 'zh' ? '请提供账户JSON' : 'Provide account JSON') + '</span>';
                 return;
@@ -1538,7 +1652,6 @@ class WebUIServer {
                     : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
                 if (data.success) {
                     textInput.value = '';
-                    fileInput.value = '';
                     updateAccount(data.account);
                 }
             } catch (e) {
@@ -1895,6 +2008,7 @@ class WebUIServer {
         window.addEventListener('load', () => {
             try { connectWebSocket(); } catch (e) { console.error('WS init failed:', e); }
             try { refreshData(); } catch (e) { console.error('Initial refresh failed:', e); }
+            try { initAccountDropzone(); } catch (e) { console.error('Dropzone init failed:', e); }
             setInterval(() => {
                 try { refreshData(); } catch (e) { console.error('Refresh failed:', e); }
             }, 30000);
