@@ -102,7 +102,7 @@ class WebUIServer {
                 const tasks = this.mesh.taskBazaar.getTasks();
                 data = tasks.map(t => ({
                     ...t,
-                    liked: this.mesh.ratingStore?.hasLike?.(t.taskId) || false
+                    voted: this.mesh.ratingStore?.hasVote?.(t.taskId) || false
                 }));
             } else {
                 data = [];
@@ -114,7 +114,7 @@ class WebUIServer {
             data = this.mesh ? this.sanitizeCapsule(this.mesh.memoryStore.getCapsule(assetId)) : null;
         } else if (url === '/api/stats') {
             const platformAccountId = this.mesh?.getPlatformAccountId?.();
-            const rating = this.mesh?.ratingStore?.getNode?.(this.mesh?.options?.nodeId) || null;
+            const rating = this.mesh?.ratingStore?.ensureNode?.(this.mesh?.options?.nodeId) || null;
             const ratingRules = this.mesh?.ratingStore?.getRules?.() || null;
             data = {
                 memories: this.mesh ? this.mesh.memoryStore.getStats() : {},
@@ -254,7 +254,7 @@ class WebUIServer {
                 res.end(JSON.stringify(data));
             });
             return;
-        } else if (url === '/api/task/like' && req.method === 'POST') {
+        } else if (url === '/api/task/vote' && req.method === 'POST') {
             let body = '';
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
@@ -264,22 +264,27 @@ class WebUIServer {
                         data = { error: 'Mesh not initialized' };
                     } else {
                         const task = this.mesh.taskBazaar.getTask(payload.taskId);
-                        const winnerNodeId = task?.completedBy || task?.winner;
+                        const winnerNodeId = task?.completedBy || task?.winner || task?.result?.nodeId;
                         if (!task || task.status !== 'completed' || !winnerNodeId) {
-                            data = { error: 'Task not eligible for like' };
+                            data = { error: 'Task not eligible for vote' };
                         } else {
                             const likedBy = payload.likedBy || this.mesh.options.nodeId;
-                            const result = this.mesh.ratingStore.addLike(task.taskId, winnerNodeId, likedBy);
-                            if (result.ok) {
-                                if (this.mesh.node && this.mesh.node.broadcast) {
-                                    this.mesh.node.broadcast({
-                                        type: 'task_like',
-                                        payload: { taskId: task.taskId, winnerNodeId, likedBy }
-                                    });
-                                }
-                                data = { success: true };
+                            const delta = Number(payload.delta || 0);
+                            if (delta !== 2 && delta !== -1) {
+                                data = { error: 'Invalid vote delta' };
                             } else {
-                                data = { error: result.reason || 'Already liked' };
+                                const result = this.mesh.ratingStore.addVote(task.taskId, winnerNodeId, likedBy, delta);
+                                if (result.ok) {
+                                    if (this.mesh.node && this.mesh.node.broadcast) {
+                                        this.mesh.node.broadcast({
+                                            type: 'task_like',
+                                            payload: { taskId: task.taskId, winnerNodeId, likedBy, delta }
+                                        });
+                                    }
+                                    data = { success: true };
+                                } else {
+                                    data = { error: result.reason || 'Already voted' };
+                                }
                             }
                         }
                     }
@@ -1341,7 +1346,12 @@ class WebUIServer {
         
         function updateTasks(tasks) {
             const tbody = document.querySelector('#tasksTable tbody');
-            const rows = tasks.slice(0, 10).map(t => {
+            const sorted = [...tasks].sort((a, b) => {
+                const at = new Date(a.published_at || 0).getTime();
+                const bt = new Date(b.published_at || 0).getTime();
+                return bt - at;
+            });
+            const rows = sorted.slice(0, 10).map(t => {
                 const statusText = t.status === 'completed'
                     ? (currentLang === 'zh' ? '已完成' : t.status)
                     : t.status === 'working'
@@ -1351,15 +1361,15 @@ class WebUIServer {
                 const downloadBtn = t.status === 'completed'
                     ? '<button class="btn-small" onclick="downloadTask(\\'' + t.taskId + '\\')">⬇ ' + (currentLang === 'zh' ? '下载' : 'Download') + '</button>'
                     : '';
-                const likeBtn = t.status === 'completed'
-                    ? (t.liked ? '<span style="color:#7ee787">✔</span>' : '<button class="btn-small" onclick="likeTask(\\'' + t.taskId + '\\')">👍</button>')
+                const voteBtns = t.status === 'completed'
+                    ? (t.voted ? '<span style="color:#7ee787">✔</span>' : '<button class="btn-small" onclick="voteTask(\\'' + t.taskId + '\\', 2)">👍 点赞</button> <button class="btn-small" onclick="voteTask(\\'' + t.taskId + '\\', -1)">👎 扣分</button>')
                     : '';
                 return '<tr>'
                     + '<td style="font-family:monospace;font-size:12px;">' + t.taskId.slice(0, 20) + '...</td>'
                     + '<td>' + t.description.slice(0, 40) + (t.description.length > 40 ? '...' : '') + '</td>'
                     + '<td>' + (t.bounty?.amount || 0) + ' ' + (t.bounty?.token || 'CLAW') + '</td>'
                     + '<td><span class="badge badge-' + badgeClass + '">' + statusText + '</span> ' + downloadBtn + '</td>'
-                    + '<td>' + likeBtn + '</td>'
+                    + '<td>' + voteBtns + '</td>'
                     + '</tr>';
             });
             tbody.innerHTML = rows.join('');
@@ -1709,16 +1719,16 @@ class WebUIServer {
             txStatusInterval = setInterval(update, 1000);
         }
 
-        async function likeTask(taskId) {
+        async function voteTask(taskId, delta) {
             try {
-                const res = await fetch('/api/task/like', {
+                const res = await fetch('/api/task/vote', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ taskId })
+                    body: JSON.stringify({ taskId, delta })
                 });
                 const data = await res.json();
                 if (!data.success) {
-                    alert(data.error || 'Like failed');
+                    alert(data.error || 'Vote failed');
                     return;
                 }
                 refreshData();

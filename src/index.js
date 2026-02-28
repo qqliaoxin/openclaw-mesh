@@ -107,7 +107,8 @@ class OpenClawMesh {
             memoryStore: this.memoryStore,
             ledger: this.ledger,
             walletAccountId: this.wallet.accountId,
-            ratingStore: this.ratingStore
+            ratingStore: this.ratingStore,
+            dataDir: this.options.dataDir
         });
         
         // 初始化任务处理器 (自动争单)
@@ -247,9 +248,9 @@ class OpenClawMesh {
 
         this.node.on('task:like', async (payload) => {
             try {
-                const { taskId, winnerNodeId, likedBy } = payload || {};
+                const { taskId, winnerNodeId, likedBy, delta } = payload || {};
                 if (!taskId || !winnerNodeId) return;
-                this.ratingStore?.addLike(taskId, winnerNodeId, likedBy);
+                this.ratingStore?.addVote(taskId, winnerNodeId, likedBy, Number(delta || 0));
             } catch (err) {
                 console.error('Error handling task:like:', err.message);
             }

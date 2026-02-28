@@ -14,10 +14,41 @@ class TaskBazaar extends EventEmitter {
         this.ledger = options.ledger || null;
         this.walletAccountId = options.walletAccountId || null;
         this.ratingStore = options.ratingStore || null;
+        this.dataDir = options.dataDir || process.cwd();
+        this.tasksPath = require('path').join(this.dataDir, 'tasks.json');
         
         this.tasks = new Map(); // taskId -> task
         this.submissions = new Map(); // taskId -> [solutions]
         this.completedTasks = new Set();
+        this.loadFromDisk();
+    }
+
+    loadFromDisk() {
+        const fs = require('fs');
+        if (!fs.existsSync(this.tasksPath)) return;
+        try {
+            const raw = JSON.parse(fs.readFileSync(this.tasksPath, 'utf8'));
+            if (Array.isArray(raw)) {
+                raw.forEach(t => {
+                    if (t && t.taskId) {
+                        this.tasks.set(t.taskId, t);
+                        if (t.status === 'completed') {
+                            this.completedTasks.add(t.taskId);
+                        }
+                    }
+                });
+            }
+        } catch (e) {
+        }
+    }
+
+    saveToDisk() {
+        const fs = require('fs');
+        try {
+            const payload = Array.from(this.tasks.values());
+            fs.writeFileSync(this.tasksPath, JSON.stringify(payload, null, 2));
+        } catch (e) {
+        }
     }
     
     // 发布任务
@@ -41,6 +72,7 @@ class TaskBazaar extends EventEmitter {
         task.status = this.isEscrowFunded(task) ? 'open' : 'pending_escrow';
         task.submissions = [];
         this.tasks.set(task.taskId, task);
+        this.saveToDisk();
         
         console.log(`🎯 Task published: ${task.taskId}`);
         console.log(`   Bounty: ${task.bounty.amount} ${task.bounty.token}`);
@@ -58,6 +90,7 @@ class TaskBazaar extends EventEmitter {
         task.status = this.isEscrowFunded(task) ? 'open' : 'pending_escrow';
         task.submissions = [];
         this.tasks.set(task.taskId, task);
+        this.saveToDisk();
         
         console.log(`📬 New task from network: ${task.taskId}`);
         this.emit('task:received', task);
@@ -163,6 +196,7 @@ class TaskBazaar extends EventEmitter {
         const task = this.tasks.get(taskId);
         if (task) {
             this.tasks.set(taskId, { ...task, ...updates });
+            this.saveToDisk();
             return this.tasks.get(taskId);
         }
         return null;
@@ -176,6 +210,7 @@ class TaskBazaar extends EventEmitter {
             task.completedAt = new Date().toISOString();
             task.result = result;
             this.tasks.set(taskId, task);
+            this.saveToDisk();
             return task;
         }
         return null;

@@ -24,10 +24,11 @@ class RatingStore {
                 score INTEGER DEFAULT 0,
                 updated_at INTEGER DEFAULT 0
             );
-            CREATE TABLE IF NOT EXISTS task_likes (
+            CREATE TABLE IF NOT EXISTS task_votes (
                 task_id TEXT PRIMARY KEY,
-                liked_by_node TEXT,
-                liked_at INTEGER
+                voted_by_node TEXT,
+                vote_value INTEGER,
+                voted_at INTEGER
             );
         `);
     }
@@ -95,12 +96,12 @@ class RatingStore {
         return this.getNode(nodeId);
     }
 
-    addLike(taskId, nodeId, likedByNode = null) {
-        const existing = this.db.prepare('SELECT 1 FROM task_likes WHERE task_id = ?').get(taskId);
-        if (existing) return { ok: false, reason: 'Task already liked' };
-        this.db.prepare('INSERT INTO task_likes (task_id, liked_by_node, liked_at) VALUES (?, ?, ?)').run(taskId, likedByNode, Date.now());
+    addVote(taskId, nodeId, votedByNode = null, delta = 0) {
+        const existing = this.db.prepare('SELECT 1 FROM task_votes WHERE task_id = ?').get(taskId);
+        if (existing) return { ok: false, reason: 'Task already voted' };
+        this.db.prepare('INSERT INTO task_votes (task_id, voted_by_node, vote_value, voted_at) VALUES (?, ?, ?, ?)').run(taskId, votedByNode, delta, Date.now());
         const row = this.ensureNode(nodeId);
-        const likes = Number(row.likes || 0) + 1;
+        const likes = Number(row.likes || 0) + delta;
         const score = this.computeScore({ ...row, likes });
         this.db.prepare(`
             UPDATE node_ratings
@@ -117,8 +118,8 @@ class RatingStore {
         return Number(row.score || 0) < this.threshold;
     }
 
-    hasLike(taskId) {
-        return Boolean(this.db.prepare('SELECT 1 FROM task_likes WHERE task_id = ?').get(taskId));
+    hasVote(taskId) {
+        return Boolean(this.db.prepare('SELECT 1 FROM task_votes WHERE task_id = ?').get(taskId));
     }
 
     getRules() {
@@ -129,7 +130,8 @@ class RatingStore {
             threshold: this.threshold,
             pointsPerTask: 2,
             penaltyPerFail: 10,
-            likePoints: 1,
+            likePoints: 2,
+            dislikePoints: -1,
             maxSpeedScore: 10000
         };
     }
