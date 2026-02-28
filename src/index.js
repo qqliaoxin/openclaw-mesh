@@ -53,6 +53,9 @@ class OpenClawMesh {
         });
         await this.memoryStore.init();
         this.memoryStore.ensureAccount(this.options.nodeId, { algorithm: 'gep-lite-v1' });
+        if (!this.options.isGenesisNode && this.options.masterUrl) {
+            await this.registerAccountToMaster();
+        }
         
         // 初始化P2P节点
         this.node = new MeshNode({
@@ -85,6 +88,7 @@ class OpenClawMesh {
             this.syncInterval = setInterval(async () => {
                 try {
                     await this.memoryStore.syncFromMaster(this.options.masterUrl);
+                    await this.registerAccountToMaster();
                 } catch (e) {
                 }
             }, 60000);
@@ -95,6 +99,29 @@ class OpenClawMesh {
         console.log(`   WebUI: http://localhost:${this.options.webPort}`);
         
         return this;
+    }
+
+    async registerAccountToMaster() {
+        if (!this.options.masterUrl || this.options.isGenesisNode) return;
+        try {
+            const payload = this.memoryStore.exportAccount(this.options.nodeId);
+            payload.force = true;
+            const res = await fetch(`${this.options.masterUrl.replace(/\/$/, '')}/api/account/import`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json().catch(() => ({}));
+            if (data && data.error) {
+                console.error(`⚠️  Account sync to master failed: ${data.error}`);
+            } else if (!res.ok) {
+                console.error(`⚠️  Account sync to master failed: HTTP ${res.status}`);
+            } else {
+                console.log(`✅ Account synced to master: ${payload.account?.accountId}`);
+            }
+        } catch (e) {
+            console.error(`⚠️  Account sync to master failed: ${e.message}`);
+        }
     }
     
     setupEventHandlers() {

@@ -112,10 +112,11 @@ openclaw-mesh account transfer --from-account <accountId>
 
 ### 1. 主节点启动：
 ```bash
+# Genesis node (example)
 ./src/cli.js init Genesis-Node --genesis --config ~/genesis.json
 ./src/cli.js init Genesis-Node --genesis --port 4000 --web-port 3457 --config ~/genesis.json
 
-./src/cli.js start --config ~/genesis.json
+./src/cli.js start --config ~/genesis.json --port 4000
 ```
 
 初始化时将使用新的 AI 算法生成账户身份。
@@ -123,7 +124,11 @@ openclaw-mesh account transfer --from-account <accountId>
 ### 2. 从节点启动并同步主节点
 
 ```bash
-./src/cli.js start --config ~/mesh.json --master http://localhost:3457
+./src/cli.js init Node1 --config ~/mesh1.json --port 4003 --web-port 3453
+# Follower node
+./src/cli.js start --config ~/mesh3.json \
+  --bootstrap localhost:4000 \
+  --master http://localhost:3457
 ```
 
 启动后访问 WebUI: http://localhost:3457

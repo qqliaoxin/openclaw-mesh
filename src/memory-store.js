@@ -420,6 +420,38 @@ class MemoryStore {
         return this.getAccountByNodeId(nodeId);
     }
 
+    registerAccount(payload = {}) {
+        if (!payload.account || !payload.account.accountId) {
+            throw new Error('Invalid account payload');
+        }
+        const incoming = { ...payload.account };
+        const targetNodeId = incoming.nodeId || payload.nodeId;
+        if (!targetNodeId) {
+            throw new Error('Missing account nodeId');
+        }
+        const existing = this.accounts.get(incoming.accountId);
+        if (existing && existing.nodeId && existing.nodeId !== targetNodeId && !payload.force) {
+            throw new Error('Account already bound to another node');
+        }
+        const existingForNode = this.accountIndex.get(targetNodeId);
+        if (existingForNode && existingForNode !== incoming.accountId && !payload.force) {
+            throw new Error('Node already bound to another account');
+        }
+        incoming.nodeId = targetNodeId;
+        incoming.importedAt = new Date().toISOString();
+        incoming.balance = 0;
+        this.accounts.set(incoming.accountId, incoming);
+        this.accountIndex.set(targetNodeId, incoming.accountId);
+        this.appendLedgerEntry({
+            type: 'account_imported',
+            accountId: incoming.accountId,
+            nodeId: targetNodeId
+        });
+        this.saveAccountsToDisk();
+        this.saveLedgerToDisk();
+        return this.getAccountByNodeId(targetNodeId);
+    }
+
     createAccountWithAI(nodeId, options = {}) {
         const algorithm = options.algorithm || 'gep-lite-v1';
         const seed = options.seed || crypto.randomBytes(16).toString('hex');

@@ -175,8 +175,8 @@ class WebUIServer {
                 try {
                     const payload = JSON.parse(body);
                     if (this.mesh) {
-                        const nodeId = this.mesh.options?.nodeId || this.mesh.node?.nodeId;
-                        const account = this.mesh.memoryStore.importAccount(nodeId, payload);
+                        const account = this.mesh.memoryStore.registerAccount(payload);
+                        console.log(`✅ Account import via API: ${account?.accountId}`);
                         data = { success: true, account };
                     } else {
                         data = { error: 'Mesh not initialized' };

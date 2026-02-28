@@ -462,16 +462,45 @@ async function accountCommand(subcommand, args, configPath = null) {
             return;
         }
         if (subcommand === 'transfer') {
-            const fromAccountId = getArg(args, '--from-account') || getArg(args, '--from');
-            const toAccountId = getArg(args, '--to-account') || getArg(args, '--to');
+            const fromAccountIdRaw = getArg(args, '--from-account') || getArg(args, '--from');
+            const toAccountIdRaw = getArg(args, '--to-account') || getArg(args, '--to');
+            const fromNodeId = getArg(args, '--from-node');
+            const toNodeId = getArg(args, '--to-node');
             const amount = Number(getArg(args, '--amount'));
             const operatorAccountId = getArg(args, '--operator-account') || config.genesisOperatorAccountId || null;
-            if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
-                console.error('❌ Usage: openclaw-mesh account transfer --to-account <accountId> --amount <number> [--from-account <accountId>]');
+            if ((!toAccountIdRaw && !toNodeId) || !Number.isFinite(amount) || amount <= 0) {
+                const missing = [];
+                if (!toAccountIdRaw && !toNodeId) missing.push('--to-account/--to-node');
+                if (!Number.isFinite(amount) || amount <= 0) missing.push('--amount');
+                console.error(`❌ Missing required option(s): ${missing.join(', ')}`);
+                console.error('Usage: openclaw-mesh account transfer --to-account <accountId> --amount <number> [--from-account <accountId>] [--from-node <nodeId>] [--to-node <nodeId>]');
                 return;
             }
+            const resolveAccountId = (rawAccountId, rawNodeId) => {
+                if (rawAccountId && rawAccountId.startsWith('node_')) {
+                    rawNodeId = rawAccountId;
+                    rawAccountId = null;
+                }
+                if (rawAccountId === 'genesis') {
+                    rawNodeId = store.genesisNodeId;
+                    rawAccountId = null;
+                }
+                if (rawNodeId) {
+                    const account = store.getAccountByNodeId(rawNodeId);
+                    if (!account) {
+                        throw new Error(`Account not found for nodeId: ${rawNodeId}`);
+                    }
+                    return account.accountId;
+                }
+                return rawAccountId || null;
+            };
             const currentAccountId = store.ensureAccount(nodeId).accountId;
-            const result = store.transfer(fromAccountId || currentAccountId, toAccountId, amount, { via: 'cli', operatorAccountId });
+            const fromAccountId = resolveAccountId(fromAccountIdRaw, fromNodeId) || currentAccountId;
+            const toAccountId = resolveAccountId(toAccountIdRaw, toNodeId);
+            if (!toAccountId) {
+                throw new Error('To account not found');
+            }
+            const result = store.transfer(fromAccountId, toAccountId, amount, { via: 'cli', operatorAccountId });
             console.log(JSON.stringify(result, null, 2));
             return;
         }
@@ -483,13 +512,23 @@ async function accountCommand(subcommand, args, configPath = null) {
 
 // 主函数
 async function main() {
-    const args = process.argv.slice(2);
+    let args = process.argv.slice(2);
     
-    // 解析 --config 选项（必须在所有命令之前处理）
+    // 解析 --config 选项（允许出现在任意位置）
     const configArg = getArg(args, '--config');
     if (configArg) {
         CONFIG_FILE = path.resolve(configArg);
         console.log(`📄 Using config: ${CONFIG_FILE}`);
+    }
+    // 剔除全局参数，避免影响命令解析
+    if (configArg) {
+        const idx = args.indexOf('--config');
+        if (idx >= 0) {
+            args = args.slice(0, idx).concat(args.slice(idx + 2));
+        } else {
+            // 支持 --config=path
+            args = args.filter(arg => !arg.startsWith('--config='));
+        }
     }
     
     const command = args[0];
