@@ -799,6 +799,103 @@ class WebUIServer {
             justify-content: center;
             font-size: 20px;
         }
+
+        /* Responsive + UI polish overrides */
+        body {
+            background: radial-gradient(1200px 600px at 20% -10%, rgba(0,212,255,0.12), transparent 60%),
+                        radial-gradient(900px 500px at 90% -10%, rgba(124,58,237,0.12), transparent 60%),
+                        #0f1419;
+        }
+
+        .container {
+            max-width: 1280px;
+        }
+
+        .stats-grid {
+            gap: 16px;
+        }
+
+        .stat-card {
+            border-radius: 14px;
+            border-color: #243043;
+            transition: transform 0.2s ease, border-color 0.2s ease;
+        }
+
+        .stat-card:hover {
+            transform: translateY(-3px);
+            border-color: #38bdf8;
+        }
+
+        .tabs {
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .tab {
+            padding: 10px 16px;
+            border-radius: 10px;
+        }
+
+        .card {
+            border-radius: 14px;
+            border: 1px solid #243043;
+        }
+
+        .btn {
+            font-weight: 600;
+            letter-spacing: 0.2px;
+            box-shadow: 0 6px 14px rgba(0, 212, 255, 0.18);
+        }
+
+        .btn-small {
+            font-weight: 600;
+            border-radius: 6px;
+        }
+
+        table {
+            width: 100%;
+        }
+
+        @media (max-width: 980px) {
+            .stats-grid {
+                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            }
+            header h1 {
+                font-size: 26px;
+            }
+            .node {
+                width: 54px;
+                height: 54px;
+                font-size: 10px;
+            }
+            .node.center {
+                width: 76px;
+                height: 76px;
+                font-size: 12px;
+            }
+        }
+
+        @media (max-width: 720px) {
+            .container {
+                padding: 14px;
+            }
+            .card {
+                padding: 20px;
+            }
+            .tabs {
+                padding: 8px;
+            }
+            .tab {
+                padding: 8px 12px;
+            }
+            table {
+                display: block;
+                overflow-x: auto;
+            }
+            th, td {
+                padding: 10px;
+            }
+        }
         
         .node-item.current .node-icon {
             box-shadow: 0 0 20px rgba(0, 212, 255, 0.5);
