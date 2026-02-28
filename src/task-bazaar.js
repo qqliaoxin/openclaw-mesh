@@ -11,13 +11,12 @@ class TaskBazaar extends EventEmitter {
         super();
         this.nodeId = options.nodeId;
         this.memoryStore = options.memoryStore;
+        this.ledger = options.ledger || null;
+        this.walletAccountId = options.walletAccountId || null;
         
         this.tasks = new Map(); // taskId -> task
         this.submissions = new Map(); // taskId -> [solutions]
         this.completedTasks = new Set();
-        
-        this.balance = 1000; // 初始积分
-        this.escrow = new Map(); // taskId -> locked amount
     }
     
     // 发布任务
@@ -35,18 +34,10 @@ class TaskBazaar extends EventEmitter {
         task.publisher = task.publisher || this.nodeId;
         task.bounty.token = task.bounty.token || 'CLAW';
 
-        if (this.memoryStore && typeof this.memoryStore.lockEscrow === 'function') {
-            this.memoryStore.lockEscrow(task.taskId, task.publisher, task.bounty.amount, task.bounty.token);
-        } else {
-            if (this.balance < task.bounty.amount) {
-                throw new Error('Insufficient balance');
-            }
-            this.balance -= task.bounty.amount;
-            this.escrow.set(task.taskId, task.bounty.amount);
-        }
+        task.escrowAccountId = task.escrowAccountId || this.getEscrowAccountId(task.taskId);
         
         // 存储任务
-        task.status = 'open';
+        task.status = this.isEscrowFunded(task) ? 'open' : 'pending_escrow';
         task.submissions = [];
         this.tasks.set(task.taskId, task);
         
@@ -62,8 +53,8 @@ class TaskBazaar extends EventEmitter {
         if (this.tasks.has(task.taskId)) {
             return; // 已存在
         }
-        
-        task.status = 'open';
+        task.escrowAccountId = task.escrowAccountId || this.getEscrowAccountId(task.taskId);
+        task.status = this.isEscrowFunded(task) ? 'open' : 'pending_escrow';
         task.submissions = [];
         this.tasks.set(task.taskId, task);
         
@@ -95,15 +86,7 @@ class TaskBazaar extends EventEmitter {
             task.status = 'completed';
             task.winner = solverId;
             
-            // 发放奖励
-            let reward = 0;
-            if (this.memoryStore && typeof this.memoryStore.releaseEscrow === 'function') {
-                const released = this.memoryStore.releaseEscrow(taskId, solverId);
-                reward = released.released || 0;
-            } else {
-                reward = this.escrow.get(taskId) || 0;
-                this.escrow.delete(taskId);
-            }
+            const reward = task.bounty?.amount || 0;
             
             console.log(`🏆 Task completed: ${taskId}`);
             console.log(`   Winner: ${solverId}`);
@@ -118,7 +101,8 @@ class TaskBazaar extends EventEmitter {
             return {
                 success: true,
                 winner: true,
-                reward
+                reward,
+                winnerId: solverId
             };
         }
         
@@ -204,19 +188,37 @@ class TaskBazaar extends EventEmitter {
     
     // 获取余额
     getBalance() {
-        if (this.memoryStore && typeof this.memoryStore.getBalance === 'function') {
-            const locked = Array.from(this.memoryStore.escrows?.values?.() || [])
-                .filter(e => e.from === this.nodeId)
-                .reduce((a, b) => a + (b.amount || 0), 0);
-            return {
-                available: this.memoryStore.getBalance(this.nodeId),
-                locked
-            };
+        if (!this.ledger || !this.walletAccountId) {
+            return { available: 0, locked: 0 };
         }
-        return {
-            available: this.balance,
-            locked: Array.from(this.escrow.values()).reduce((a, b) => a + b, 0)
-        };
+        const available = this.ledger.getBalance(this.walletAccountId);
+        let locked = 0;
+        for (const task of this.tasks.values()) {
+            if (task.publisher === this.nodeId && task.escrowAccountId && task.status !== 'completed') {
+                locked += this.ledger.getBalance(task.escrowAccountId) || 0;
+            }
+        }
+        return { available, locked };
+    }
+
+    isEscrowFunded(task) {
+        if (!this.ledger || !task?.escrowAccountId) return true;
+        const balance = this.ledger.getBalance(task.escrowAccountId);
+        return Number(balance) >= Number(task.bounty?.amount || 0);
+    }
+
+    tryActivatePendingTasks() {
+        for (const task of this.tasks.values()) {
+            if (task.status === 'pending_escrow' && this.isEscrowFunded(task)) {
+                task.status = 'open';
+                this.tasks.set(task.taskId, task);
+            }
+        }
+    }
+
+    getEscrowAccountId(taskId) {
+        const hash = crypto.createHash('sha256').update(String(taskId)).digest('hex').slice(0, 24);
+        return `escrow_${hash}`;
     }
     
     // 创建Swarm任务（复杂任务分解）

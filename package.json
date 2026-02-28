@@ -15,7 +15,7 @@
   "dependencies": {
     "@lancedb/lancedb": "^0.26.2",
     "archiver": "^7.0.1",
-    "openclaw-mesh": "file:openclaw-mesh-1.0.0.tgz",
+    "better-sqlite3": "^11.6.0",
     "ws": "^8.16.0"
   },
   "engines": {

@@ -11,3 +11,6 @@
   --to-account acct_25af84277c362b9e \
   --amount 100 \
   --operator-account acct_41f57c9bbbb35f51
+
+查询账户余额：
+./src/cli.js --config ~/mesh1.json account export

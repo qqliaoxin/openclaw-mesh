@@ -69,15 +69,29 @@ class WebUIServer {
             data = this.mesh ? this.mesh.getStats() : { error: 'Mesh not initialized' };
         } else if (url === '/api/account') {
             if (this.mesh) {
-                const nodeId = this.mesh.options?.nodeId || this.mesh.node?.nodeId;
-                data = this.mesh.memoryStore.ensureAccount(nodeId);
+                const accountId = this.mesh.wallet?.accountId;
+                data = {
+                    accountId,
+                    balance: this.mesh.ledger?.getBalance(accountId) || 0,
+                    nonce: this.mesh.ledger?.getNonce(accountId) || 0,
+                    publicKeyPem: this.mesh.wallet?.publicKeyPem || null
+                };
             } else {
                 data = { error: 'Mesh not initialized' };
             }
         } else if (url === '/api/account/export') {
             if (this.mesh) {
-                const nodeId = this.mesh.options?.nodeId || this.mesh.node?.nodeId;
-                data = this.mesh.memoryStore.exportAccount(nodeId);
+                const accountId = this.mesh.wallet?.accountId;
+                data = {
+                    version: 2,
+                    exportedAt: new Date().toISOString(),
+                    account: {
+                        accountId,
+                        publicKeyPem: this.mesh.wallet?.publicKeyPem || null,
+                        balance: this.mesh.ledger?.getBalance(accountId) || 0,
+                        nonce: this.mesh.ledger?.getNonce(accountId) || 0
+                    }
+                };
             } else {
                 data = { error: 'Mesh not initialized' };
             }
@@ -91,11 +105,71 @@ class WebUIServer {
             const assetId = url.split('/').pop();
             data = this.mesh ? this.sanitizeCapsule(this.mesh.memoryStore.getCapsule(assetId)) : null;
         } else if (url === '/api/stats') {
+            const platformAccountId = this.mesh?.getPlatformAccountId?.();
             data = {
                 memories: this.mesh ? this.mesh.memoryStore.getStats() : {},
                 tasks: this.mesh ? this.mesh.taskBazaar.getStats() : {},
-                balance: this.mesh ? this.mesh.taskBazaar.getBalance() : {}
+                balance: this.mesh ? this.mesh.taskBazaar.getBalance() : {},
+                platformBalance: platformAccountId ? (this.mesh.ledger?.getBalance(platformAccountId) || 0) : 0,
+                taskPublishFee: this.mesh?.options?.taskPublishFee || 0,
+                capsulePublishFee: this.mesh?.options?.capsulePublishFee || 0
             };
+        } else if (url.startsWith('/api/tx/status')) {
+            const query = url.split('?')[1] || '';
+            const params = new URLSearchParams(query);
+            const txId = params.get('txId');
+            if (!txId) {
+                data = { error: 'Missing txId' };
+            } else if (this.mesh) {
+                data = this.mesh.getTxStatus(txId);
+            } else {
+                data = { error: 'Mesh not initialized' };
+            }
+        } else if (url.startsWith('/api/tx/recent')) {
+            const query = url.split('?')[1] || '';
+            const params = new URLSearchParams(query);
+            const limit = Number(params.get('limit') || 20);
+            if (this.mesh) {
+                const rows = this.mesh.ledger?.getRecentTxs(limit) || [];
+                const withConfirmations = rows.map(r => ({
+                    ...r,
+                    confirmations: this.mesh.ledger?.getConfirmations(r.txId) || 0
+                }));
+                data = { items: withConfirmations };
+            } else {
+                data = { error: 'Mesh not initialized' };
+            }
+        } else if (url === '/api/tx/config') {
+            if (req.method === 'GET') {
+                data = {
+                    confirmations: this.mesh?.options?.txConfirmations || {},
+                    timeouts: this.mesh?.options?.txTimeoutMs || {}
+                };
+            } else if (req.method === 'POST') {
+                let body = '';
+                req.on('data', chunk => body += chunk);
+                req.on('end', async () => {
+                    try {
+                        const payload = JSON.parse(body || '{}');
+                        if (this.mesh) {
+                            if (payload.confirmations) {
+                                this.mesh.options.txConfirmations = { ...this.mesh.options.txConfirmations, ...payload.confirmations };
+                            }
+                            if (payload.timeouts) {
+                                this.mesh.options.txTimeoutMs = { ...this.mesh.options.txTimeoutMs, ...payload.timeouts };
+                            }
+                            data = { success: true, confirmations: this.mesh.options.txConfirmations, timeouts: this.mesh.options.txTimeoutMs };
+                        } else {
+                            data = { error: 'Mesh not initialized' };
+                        }
+                    } catch (e) {
+                        data = { error: e.message };
+                    }
+                    res.writeHead(200);
+                    res.end(JSON.stringify(data));
+                });
+                return;
+            }
         } else if (url === '/api/snapshot') {
             if (this.mesh?.options?.isGenesisNode) {
                 data = this.mesh.memoryStore.getSnapshot();
@@ -156,8 +230,8 @@ class WebUIServer {
                             tags: payload.tags || [],
                             publisher: payload.publisher
                         });
-                        const task = this.mesh.taskBazaar.getTask(taskId);
-                        data = { success: true, task, taskId };
+                        const task = this.mesh.taskBazaar.getTask(taskId.taskId || taskId);
+                        data = { success: true, task, taskId: taskId.taskId || taskId, txReceipts: taskId.txReceipts || [] };
                     } else {
                         data = { error: 'Mesh not initialized' };
                     }
@@ -173,14 +247,7 @@ class WebUIServer {
             req.on('data', chunk => body += chunk);
             req.on('end', async () => {
                 try {
-                    const payload = JSON.parse(body);
-                    if (this.mesh) {
-                        const account = this.mesh.memoryStore.registerAccount(payload);
-                        console.log(`✅ Account import via API: ${account?.accountId}`);
-                        data = { success: true, account };
-                    } else {
-                        data = { error: 'Mesh not initialized' };
-                    }
+                    data = { error: 'Account import disabled. Private keys never leave the node.' };
                 } catch (e) {
                     data = { error: e.message };
                 }
@@ -200,11 +267,9 @@ class WebUIServer {
                         if (!toAccountId || !Number.isFinite(amount) || amount <= 0) {
                             data = { error: 'Invalid transfer payload' };
                         } else {
-                            const operatorAccountId = this.mesh.memoryStore.genesisOperatorAccountId || null;
-                            const defaultAccount = this.mesh.memoryStore.getAccountByNodeId(this.mesh.options.nodeId);
-                            const fromAccountId = payload.fromAccountId || defaultAccount?.accountId;
-                            const result = this.mesh.memoryStore.transfer(fromAccountId, toAccountId, amount, { via: 'web', operatorAccountId });
-                            data = { success: true, result };
+                            const tx = this.mesh.createSignedTransfer(toAccountId, amount);
+                            const result = this.mesh.submitTx(tx);
+                            data = { success: true, result, txId: tx.txId };
                         }
                     } else {
                         data = { error: 'Mesh not initialized' };
@@ -230,8 +295,8 @@ class WebUIServer {
                             price: payload.price,
                             attribution: payload.publisher ? { creator: payload.publisher } : undefined
                         });
-                        const capsule = this.mesh.memoryStore.getCapsule(assetId);
-                        data = { success: true, capsule, assetId };
+                        const capsule = this.mesh.memoryStore.getCapsule(assetId.assetId || assetId);
+                        data = { success: true, capsule, assetId: assetId.assetId || assetId, txReceipts: assetId.txReceipts || [] };
                     } else {
                         data = { error: 'Mesh not initialized' };
                     }
@@ -249,8 +314,8 @@ class WebUIServer {
                 try {
                     const payload = JSON.parse(body);
                     if (this.mesh) {
-                        const capsule = await this.mesh.purchaseCapsule(payload.assetId, payload.buyerNodeId);
-                        data = { success: true, capsule };
+                        const result = await this.mesh.purchaseCapsule(payload.assetId, payload.buyerNodeId);
+                        data = { success: true, capsule: result.capsule, txReceipts: result.txReceipts };
                     } else {
                         data = { error: 'Mesh not initialized' };
                     }
@@ -935,6 +1000,10 @@ class WebUIServer {
                         <input type="number" id="taskBounty" min="1" value="100" required>
                     </div>
                     <div class="form-group">
+                        <label>Publish Fee (CLAW):</label>
+                        <div><span id="taskPublishFee">0</span></div>
+                    </div>
+                    <div class="form-group">
                         <label>Tags (comma separated):</label>
                         <input type="text" id="taskTags" placeholder="trading, api, optimization">
                     </div>
@@ -1025,7 +1094,79 @@ class WebUIServer {
             <div class="card">
                 <h2 data-i18n="detailedStats">Detailed Statistics</h2>
                 <div id="detailedStats"></div>
+                <div style="margin-top:16px;">
+                    <button class="btn" onclick="openTxModal()">Tx Status</button>
+                </div>
+                <div style="margin-top:16px;">
+                    <h3>Tx Confirm Config</h3>
+                    <div class="form-group">
+                        <label>Transfer Confirmations</label>
+                        <input type="number" id="cfgConfirmTransfer" min="1" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Transfer Timeout (ms)</label>
+                        <input type="number" id="cfgTimeoutTransfer" min="1000" value="8000">
+                    </div>
+                    <div class="form-group">
+                        <label>Task Publish Confirmations</label>
+                        <input type="number" id="cfgConfirmTask" min="1" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Task Publish Timeout (ms)</label>
+                        <input type="number" id="cfgTimeoutTask" min="1000" value="8000">
+                    </div>
+                    <div class="form-group">
+                        <label>Capsule Publish Confirmations</label>
+                        <input type="number" id="cfgConfirmCapsule" min="1" value="1">
+                    </div>
+                    <div class="form-group">
+                        <label>Capsule Publish Timeout (ms)</label>
+                        <input type="number" id="cfgTimeoutCapsule" min="1000" value="8000">
+                    </div>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                        <button class="btn" onclick="saveTxConfig()">Save</button>
+                        <button class="btn" onclick="loadTxConfig()">Reload</button>
+                    </div>
+                    <div id="txConfigResult" style="margin-top:10px;"></div>
+                </div>
+                <div style="margin-top:20px;">
+                    <h3>Recent Transactions</h3>
+                    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;">
+                        <input type="text" id="txFilterId" placeholder="Filter Tx ID">
+                        <input type="text" id="txFilterType" placeholder="Filter Type">
+                        <input type="number" id="txFilterMin" placeholder="Min Amount">
+                        <input type="number" id="txFilterMax" placeholder="Max Amount">
+                        <button class="btn" onclick="applyTxFilters()">Apply</button>
+                    </div>
+                    <table id="txHistoryTable">
+                        <thead>
+                            <tr>
+                                <th>Seq</th>
+                                <th>Tx ID</th>
+                                <th>Type</th>
+                                <th>Amount</th>
+                                <th>Confirmations</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
             </div>
+        </div>
+    </div>
+
+    <div id="txModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:999;">
+        <div style="max-width:520px;margin:8% auto;background:#151515;padding:20px;border-radius:12px;border:1px solid #2a2a2a;">
+            <h3 style="margin-top:0;">Tx Status</h3>
+            <div class="form-group">
+                <label>Tx ID</label>
+                <input type="text" id="txStatusInput" placeholder="txId">
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="btn" onclick="startTxStatus()">Check</button>
+                <button class="btn" onclick="closeTxModal()">Close</button>
+            </div>
+            <div id="txStatusResult" style="margin-top:12px;"></div>
         </div>
     </div>
     
@@ -1034,9 +1175,18 @@ class WebUIServer {
     <script>
         let ws;
         let currentNodeId = null;
+        let txStatusInterval = null;
+        const confirmTargets = {
+            transfer: { target: 1, timeoutMs: 8000 },
+            taskPublish: { target: 1, timeoutMs: 8000 },
+            capsulePublish: { target: 1, timeoutMs: 8000 }
+        };
+        let txFilters = { id: '', type: '', min: null, max: null };
         
         function connectWebSocket() {
-            ws = new WebSocket('ws://localhost:${this.port}');
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = wsProtocol + '//' + window.location.host;
+            ws = new WebSocket(wsUrl);
             
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
@@ -1045,12 +1195,16 @@ class WebUIServer {
                 }
             };
             
+            ws.onerror = () => {
+                console.warn('WebSocket error');
+            };
+
             ws.onclose = () => {
                 setTimeout(connectWebSocket, 3000);
             };
         }
         
-        function switchTab(tabName) {
+        window.switchTab = function(tabName) {
             document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
             
@@ -1071,9 +1225,14 @@ class WebUIServer {
                 
                 const stats = await fetch('/api/stats').then(r => r.json());
                 updateStats(stats);
+                updateFees(stats);
+                await loadTxConfig();
 
                 const account = await fetch('/api/account').then(r => r.json());
                 updateAccount(account);
+
+                const txHistory = await fetch('/api/tx/recent?limit=20').then(r => r.json());
+                updateTxHistory(txHistory.items || []);
             } catch (e) {
                 console.error('Failed to refresh:', e);
             }
@@ -1216,6 +1375,23 @@ class WebUIServer {
             }
         }
 
+        async function waitForTx(txId, target = 1, timeoutMs = 8000, intervalMs = 300) {
+            const started = Date.now();
+            while (Date.now() - started < timeoutMs) {
+                const status = await fetch('/api/tx/status?txId=' + encodeURIComponent(txId)).then(r => r.json());
+                if (status.confirmations >= target) {
+                    return status;
+                }
+                await new Promise(r => setTimeout(r, intervalMs));
+            }
+            return await fetch('/api/tx/status?txId=' + encodeURIComponent(txId)).then(r => r.json());
+        }
+
+        function renderTxReceipts(receipts) {
+            if (!receipts || receipts.length === 0) return '';
+            return receipts.map(r => 'Tx ' + r.txId.slice(0, 8) + '… confirmations: ' + r.confirmations).join('<br>');
+        }
+
         async function transferAccount() {
             const toAccountId = document.getElementById('transferToAccountId').value.trim();
             const amount = Number(document.getElementById('transferAmount').value);
@@ -1231,9 +1407,20 @@ class WebUIServer {
                     body: JSON.stringify({ toAccountId, amount, fromAccountId })
                 });
                 const data = await res.json();
-                document.getElementById('transferResult').innerHTML = data.success
-                    ? '<span style="color:green">✅ ' + (currentLang === 'zh' ? '转账成功' : 'Transfer completed') + '</span>'
-                    : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                if (data.success) {
+                    let message = currentLang === 'zh' ? '✅ 转账成功' : '✅ Transfer completed';
+                    if (data.txId) {
+                        const cfg = confirmTargets.transfer;
+                        const status = await waitForTx(data.txId, cfg.target, cfg.timeoutMs);
+                        message += ' (confirmations: ' + (status.confirmations || 0) + ')';
+                        if (!status.confirmed) {
+                            message += ' ⚠️ Confirmation timeout';
+                        }
+                    }
+                    document.getElementById('transferResult').innerHTML = '<span style="color:green">' + message + '</span>';
+                } else {
+                    document.getElementById('transferResult').innerHTML = '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                }
                 if (data.success) {
                     document.getElementById('transferToAccountId').value = '';
                     document.getElementById('transferAmount').value = 1;
@@ -1260,9 +1447,19 @@ class WebUIServer {
                 const successMessage = currentLang === 'zh'
                     ? '✅ 任务已发布：' + (data.task || '')
                     : '✅ Task published: ' + (data.task || '');
-                document.getElementById('publishResult').innerHTML = data.success 
-                    ? '<span style="color:green">' + successMessage + '</span>'
-                    : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                if (data.success) {
+                    let message = successMessage;
+                    if (data.txReceipts && data.txReceipts.length > 0) {
+                        const timeouts = data.txReceipts.filter(r => !r.confirmed).length;
+                        message += '<br>' + renderTxReceipts(data.txReceipts);
+                        if (timeouts > 0) {
+                            message += '<br><span style="color:#f5c542">⚠️ Confirmation timeout</span>';
+                        }
+                    }
+                    document.getElementById('publishResult').innerHTML = '<span style="color:green">' + message + '</span>';
+                } else {
+                    document.getElementById('publishResult').innerHTML = '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                }
                 if (data.success) {
                     document.getElementById('taskForm').reset();
                     refreshData();
@@ -1286,9 +1483,19 @@ class WebUIServer {
                     body: JSON.stringify({ content, type, tags, price: { amount: price, token: 'CLAW' } })
                 });
                 const data = await res.json();
-                document.getElementById('capsuleResult').innerHTML = data.success 
-                    ? '<span style="color:green">✅ Capsule published successfully!</span>'
-                    : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                if (data.success) {
+                    let message = '✅ Capsule published successfully!';
+                    if (data.txReceipts && data.txReceipts.length > 0) {
+                        message += '<br>' + renderTxReceipts(data.txReceipts);
+                        const timeouts = data.txReceipts.filter(r => !r.confirmed).length;
+                        if (timeouts > 0) {
+                            message += '<br><span style="color:#f5c542">⚠️ Confirmation timeout</span>';
+                        }
+                    }
+                    document.getElementById('capsuleResult').innerHTML = '<span style="color:green">' + message + '</span>';
+                } else {
+                    document.getElementById('capsuleResult').innerHTML = '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+                }
                 if (data.success) {
                     document.getElementById('capsuleForm').reset();
                     refreshData();
@@ -1309,6 +1516,12 @@ class WebUIServer {
                 if (!data.success) {
                     alert(data.error || 'Purchase failed');
                     return;
+                }
+                if (data.txReceipts && data.txReceipts.length > 0) {
+                    const timeouts = data.txReceipts.filter(r => !r.confirmed).length;
+                    let msg = 'Purchase confirmed.\\n' + data.txReceipts.map(r => 'Tx ' + r.txId.slice(0, 8) + '… confirmations: ' + r.confirmations).join('\\n');
+                    if (timeouts > 0) msg += '\\n⚠️ Confirmation timeout';
+                    alert(msg);
                 }
                 const blob = new Blob([JSON.stringify(data.capsule, null, 2)], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
@@ -1338,12 +1551,142 @@ class WebUIServer {
                 <h3>Balance</h3>
                 <p>Available: \${stats.balance.available || 0}</p>
                 <p>Locked: \${stats.balance.locked || 0}</p>
+                <p>Platform Balance: \${stats.platformBalance || 0}</p>
             \`;
         }
+
+        function updateTxHistory(items) {
+            const tbody = document.querySelector('#txHistoryTable tbody');
+            if (!tbody) return;
+            if (!items || items.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5">No transactions</td></tr>';
+                return;
+            }
+            const filtered = items.filter(tx => {
+                if (txFilters.id && !tx.txId.includes(txFilters.id)) return false;
+                if (txFilters.type && tx.type !== txFilters.type) return false;
+                const amt = Number(tx.amount || 0);
+                if (Number.isFinite(txFilters.min) && amt < txFilters.min) return false;
+                if (Number.isFinite(txFilters.max) && amt > txFilters.max) return false;
+                return true;
+            });
+            tbody.innerHTML = (filtered.length ? filtered : items).map(tx =>
+                '<tr>'
+                + '<td>' + tx.seq + '</td>'
+                + '<td><a href="#" onclick="openTxStatus(\\'' + tx.txId + '\\');return false;">' + tx.txId.slice(0, 8) + '...</a></td>'
+                + '<td>' + tx.type + '</td>'
+                + '<td>' + tx.amount + '</td>'
+                + '<td>' + (tx.confirmations || 0) + '</td>'
+                + '</tr>'
+            ).join('');
+        }
+
+        function updateFees(stats) {
+            const feeEl = document.getElementById('taskPublishFee');
+            if (feeEl) {
+                feeEl.textContent = stats.taskPublishFee || 0;
+            }
+        }
+
+        function openTxModal() {
+            document.getElementById('txModal').style.display = 'block';
+            document.getElementById('txStatusResult').innerHTML = '';
+            if (txStatusInterval) clearInterval(txStatusInterval);
+        }
+
+        function closeTxModal() {
+            document.getElementById('txModal').style.display = 'none';
+            if (txStatusInterval) {
+                clearInterval(txStatusInterval);
+                txStatusInterval = null;
+            }
+        }
+
+        function openTxStatus(txId) {
+            openTxModal();
+            document.getElementById('txStatusInput').value = txId;
+            startTxStatus();
+        }
+
+        async function startTxStatus() {
+            const txId = document.getElementById('txStatusInput').value.trim();
+            if (!txId) {
+                document.getElementById('txStatusResult').innerHTML = '<span style="color:red">❌ Missing txId</span>';
+                return;
+            }
+            if (txStatusInterval) clearInterval(txStatusInterval);
+            const update = async () => {
+                const status = await fetch('/api/tx/status?txId=' + encodeURIComponent(txId)).then(r => r.json());
+            const msg = 'Confirmations: ' + (status.confirmations || 0) + (status.confirmed ? '' : ' ⚠️ Confirmation timeout');
+                document.getElementById('txStatusResult').innerHTML = '<span>' + msg + '</span>';
+            };
+            document.getElementById('txStatusResult').innerHTML = '<span>Checking...</span>';
+            await update();
+            txStatusInterval = setInterval(update, 1000);
+        }
+
+        function applyTxFilters() {
+            txFilters = {
+                id: document.getElementById('txFilterId').value.trim(),
+                type: document.getElementById('txFilterType').value.trim(),
+                min: document.getElementById('txFilterMin').value ? Number(document.getElementById('txFilterMin').value) : null,
+                max: document.getElementById('txFilterMax').value ? Number(document.getElementById('txFilterMax').value) : null
+            };
+            refreshData();
+        }
+
+        async function loadTxConfig() {
+            const cfg = await fetch('/api/tx/config').then(r => r.json());
+            if (cfg.confirmations) {
+                confirmTargets.transfer.target = cfg.confirmations.transfer || 1;
+                confirmTargets.taskPublish.target = cfg.confirmations.taskPublish || 1;
+                confirmTargets.capsulePublish.target = cfg.confirmations.capsulePublish || 1;
+                document.getElementById('cfgConfirmTransfer').value = confirmTargets.transfer.target;
+                document.getElementById('cfgConfirmTask').value = confirmTargets.taskPublish.target;
+                document.getElementById('cfgConfirmCapsule').value = confirmTargets.capsulePublish.target;
+            }
+            if (cfg.timeouts) {
+                confirmTargets.transfer.timeoutMs = cfg.timeouts.transfer || 8000;
+                confirmTargets.taskPublish.timeoutMs = cfg.timeouts.taskPublish || 8000;
+                confirmTargets.capsulePublish.timeoutMs = cfg.timeouts.capsulePublish || 8000;
+                document.getElementById('cfgTimeoutTransfer').value = confirmTargets.transfer.timeoutMs;
+                document.getElementById('cfgTimeoutTask').value = confirmTargets.taskPublish.timeoutMs;
+                document.getElementById('cfgTimeoutCapsule').value = confirmTargets.capsulePublish.timeoutMs;
+            }
+        }
+
+        async function saveTxConfig() {
+            const payload = {
+                confirmations: {
+                    transfer: Number(document.getElementById('cfgConfirmTransfer').value || 1),
+                    taskPublish: Number(document.getElementById('cfgConfirmTask').value || 1),
+                    capsulePublish: Number(document.getElementById('cfgConfirmCapsule').value || 1)
+                },
+                timeouts: {
+                    transfer: Number(document.getElementById('cfgTimeoutTransfer').value || 8000),
+                    taskPublish: Number(document.getElementById('cfgTimeoutTask').value || 8000),
+                    capsulePublish: Number(document.getElementById('cfgTimeoutCapsule').value || 8000)
+                }
+            };
+            const res = await fetch('/api/tx/config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const data = await res.json();
+            document.getElementById('txConfigResult').innerHTML = data.success
+                ? '<span style="color:green">✅ Saved</span>'
+                : '<span style="color:red">❌ ' + (data.error || 'Failed') + '</span>';
+            await loadTxConfig();
+        }
         
-        connectWebSocket();
-        refreshData();
-        setInterval(refreshData, 30000);
+        window.addEventListener('load', () => {
+            try { connectWebSocket(); } catch (e) { console.error('WS init failed:', e); }
+            try { refreshData(); } catch (e) { console.error('Initial refresh failed:', e); }
+            setInterval(() => {
+                try { refreshData(); } catch (e) { console.error('Refresh failed:', e); }
+            }, 30000);
+        });
     </script>
 </body>
 </html>`;

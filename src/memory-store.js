@@ -19,12 +19,15 @@ class MemoryStore {
         this.isGenesisNode = Boolean(options.isGenesisNode);
         this.masterUrl = options.masterUrl || null;
         this.genesisOperatorAccountId = options.genesisOperatorAccountId || null;
+        this.onLedgerEntry = typeof options.onLedgerEntry === 'function' ? options.onLedgerEntry : null;
         const envDisable = process.env.OPENCLAW_DISABLE_LANCE === '1' || process.env.OPENCLAW_USE_LANCE === '0';
         this.useLance = options.useLance !== false && !envDisable;
         this.lancePath = path.join(this.dataDir, 'lancedb');
         this.lanceDb = null;
         this.lance = null;
         this.lanceAvailable = false;
+        this.lanceReady = false;
+        this.lanceQueue = Promise.resolve();
         this.genesisNodeId = 'node_genesis';
         this.genesisSeed = 'genesis';
         this.genesisSupply = Number(process.env.OPENCLAW_GENESIS_SUPPLY) || 1000000;
@@ -75,15 +78,42 @@ class MemoryStore {
             this.lance = lancedb;
             this.lanceDb = await lancedb.connect(this.lancePath);
             this.lanceAvailable = true;
+            this.lanceReady = true;
+            await this.ensureLanceTables();
         } catch (e) {
             this.lanceAvailable = false;
+            this.lanceReady = false;
+        }
+    }
+
+    async withLanceLock(fn) {
+        if (!this.lanceAvailable || !this.lanceDb) return null;
+        this.lanceQueue = this.lanceQueue.then(fn, fn);
+        return this.lanceQueue;
+    }
+
+    async ensureLanceTables() {
+        const tableNames = ['capsules', 'accounts', 'account_index', 'ledger', 'escrows'];
+        for (const name of tableNames) {
+            await this.withLanceLock(async () => {
+                const table = await this.openTable(name);
+                if (!table) {
+                    try {
+                        await this.lanceDb.createTable(name, [{ _empty: true }], { mode: 'overwrite' });
+                    } catch (e) {
+                        // Retry once after a short delay
+                        await new Promise(resolve => setTimeout(resolve, 200));
+                        await this.lanceDb.createTable(name, [{ _empty: true }], { mode: 'overwrite' });
+                    }
+                }
+            });
         }
     }
 
     async loadFromLance() {
         if (!this.lanceAvailable || !this.lanceDb) return false;
         try {
-            const capsulesTable = await this.openTable('capsules');
+            const capsulesTable = await this.withLanceLock(() => this.openTable('capsules'));
             if (capsulesTable) {
                 const rows = await capsulesTable.toArray();
                 for (const row of rows) {
@@ -96,7 +126,7 @@ class MemoryStore {
                     }
                 }
             }
-            const accountsTable = await this.openTable('accounts');
+            const accountsTable = await this.withLanceLock(() => this.openTable('accounts'));
             if (accountsTable) {
                 const rows = await accountsTable.toArray();
                 for (const row of rows) {
@@ -109,7 +139,7 @@ class MemoryStore {
                     }
                 }
             }
-            const indexTable = await this.openTable('account_index');
+            const indexTable = await this.withLanceLock(() => this.openTable('account_index'));
             if (indexTable) {
                 const rows = await indexTable.toArray();
                 for (const row of rows) {
@@ -121,7 +151,7 @@ class MemoryStore {
                     }
                 }
             }
-            const ledgerTable = await this.openTable('ledger');
+            const ledgerTable = await this.withLanceLock(() => this.openTable('ledger'));
             if (ledgerTable) {
                 const rows = await ledgerTable.toArray();
                 const entries = rows.filter(row => !(row && row._empty)).map(row => {
@@ -132,7 +162,7 @@ class MemoryStore {
                 });
                 this.ledger = this.normalizeLedger(entries);
             }
-            const escrowsTable = await this.openTable('escrows');
+            const escrowsTable = await this.withLanceLock(() => this.openTable('escrows'));
             if (escrowsTable) {
                 const rows = await escrowsTable.toArray();
                 for (const row of rows) {
@@ -164,7 +194,7 @@ class MemoryStore {
         if (!this.lanceAvailable || !this.lanceDb) return;
         const payload = Array.isArray(rows) && rows.length > 0 ? rows : [{ _empty: true }];
         try {
-            await this.lanceDb.createTable(name, payload, { mode: 'overwrite' });
+            await this.withLanceLock(() => this.lanceDb.createTable(name, payload, { mode: 'overwrite' }));
         } catch (e) {
             this.lanceAvailable = false;
             this.useLance = false;
@@ -601,7 +631,7 @@ class MemoryStore {
         if (balance < amount) {
             throw new Error('Insufficient balance');
         }
-        this.appendLedgerEntry({
+        const entry = this.appendLedgerEntry({
             type: 'transfer',
             from: fromAccountId,
             to: toAccountId,
@@ -611,7 +641,7 @@ class MemoryStore {
             meta
         });
         this.saveLedgerToDisk();
-        return { success: true };
+        return { success: true, entry };
     }
 
     computeBalance(accountId) {
@@ -666,7 +696,7 @@ class MemoryStore {
         this.saveLedgerToDisk();
     }
 
-    appendLedgerEntry(entry) {
+    appendLedgerEntry(entry, options = {}) {
         const prevHash = this.getLedgerHeadHash() || '';
         const index = this.ledger.length;
         const payload = {
@@ -678,7 +708,43 @@ class MemoryStore {
         const hash = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
         const fullEntry = { ...payload, hash };
         this.ledger.push(fullEntry);
+        if (this.onLedgerEntry && options.broadcast !== false) {
+            try {
+                this.onLedgerEntry(fullEntry);
+            } catch (e) {
+                // Ignore broadcast errors
+            }
+        }
         return fullEntry;
+    }
+
+    hasLedgerEntry(hash) {
+        if (!hash) return false;
+        return this.ledger.some(entry => entry.hash === hash);
+    }
+
+    verifyLedgerEntry(entry) {
+        if (!entry || !entry.hash) return false;
+        const { hash, ...rest } = entry;
+        const computed = crypto.createHash('sha256').update(JSON.stringify(rest)).digest('hex');
+        return computed === hash;
+    }
+
+    applyLedgerEntry(entry) {
+        if (!entry) {
+            return { applied: false, reason: 'Invalid entry' };
+        }
+        if (entry.hash && this.ledger.some(e => e?.meta?.receivedHash === entry.hash)) {
+            return { applied: false, reason: 'Duplicate entry' };
+        }
+        const { hash, index, prevHash, ...payload } = entry;
+        const meta = { ...(payload.meta || {}) };
+        if (hash) {
+            meta.receivedHash = hash;
+        }
+        const localEntry = this.appendLedgerEntry({ ...payload, meta }, { broadcast: false });
+        this.saveLedgerToDisk();
+        return { applied: true, entry: localEntry };
     }
 
     getLedgerHeadHash() {

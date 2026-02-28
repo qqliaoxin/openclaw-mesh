@@ -94,6 +94,26 @@ class MeshNode extends EventEmitter {
             }
             this.emit('peer:alive', peerId);
         });
+        
+        // 处理交易广播
+        this.messageHandlers.set('tx', (message, peerId) => {
+            this.emit('tx:received', message.payload, peerId);
+        });
+
+        // 处理交易日志广播
+        this.messageHandlers.set('tx_log', (message, peerId) => {
+            this.emit('tx:log', message.payload, peerId);
+        });
+
+        // 处理账本同步请求
+        this.messageHandlers.set('tx_log_request', (message, peerId) => {
+            this.emit('tx:log_request', message.payload, peerId);
+        });
+
+        // 处理账本批量同步
+        this.messageHandlers.set('tx_log_batch', (message, peerId) => {
+            this.emit('tx:log_batch', message.payload, peerId);
+        });
     }
     
     async init() {

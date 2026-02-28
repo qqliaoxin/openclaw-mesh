@@ -5,7 +5,11 @@
  */
 
 const OpenClawMesh = require('./index');
+const MeshNode = require('./node');
 const MemoryStore = require('./memory-store');
+const LedgerStore = require('./ledger-store');
+const { loadOrCreateWallet, signPayload } = require('./wallet');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 
@@ -98,6 +102,7 @@ OpenClaw Mesh - 去中心化技能共享网络
   openclaw-mesh account export --out account.json
   openclaw-mesh account import ./account.json
   openclaw-mesh account transfer --to-account acct_xxx --amount 100
+  openclaw-mesh account transfer --to-account acct_xxx --amount 100 --bootstrap localhost:4000
 `);
 }
 
@@ -259,7 +264,8 @@ async function publish(args) {
         return;
     }
     
-    const assetId = await global.meshInstance.publishCapsule(capsule);
+    const result = await global.meshInstance.publishCapsule(capsule);
+    const assetId = result.assetId || result;
     console.log(`✅ Published: ${assetId}`);
 }
 
@@ -353,7 +359,8 @@ async function publishTask(args) {
         deadline: new Date(Date.now() + 86400000).toISOString()
     };
     
-    const taskId = await global.meshInstance.publishTask(task);
+    const result = await global.meshInstance.publishTask(task);
+    const taskId = result.taskId || result;
     console.log(`✅ Task published: ${taskId}`);
 }
 
@@ -427,21 +434,22 @@ async function config() {
 
 async function accountCommand(subcommand, args, configPath = null) {
     const config = ensureNodeConfig(loadConfig(configPath));
-    const nodeId = config.nodeId;
     const dataDir = config.dataDir || './data';
-    const algorithm = getArg(args, '--algorithm', 'gep-lite-v1');
-    const masterUrl = getArg(args, '--master') || config.masterUrl || null;
-    const store = new MemoryStore(dataDir, {
-        nodeId,
-        isGenesisNode: config.isGenesisNode || false,
-        masterUrl,
-        genesisOperatorAccountId: config.genesisOperatorAccountId || null
-    });
-    await store.init();
+    const wallet = loadOrCreateWallet(dataDir);
+    const ledger = new LedgerStore(dataDir);
+    ledger.init({ isGenesis: config.isGenesisNode || false, genesisAccountId: wallet.accountId, genesisSupply: 1000000, genesisPublicKeyPem: wallet.publicKeyPem, genesisPrivateKeyPem: wallet.privateKeyPem });
     try {
         if (subcommand === 'export') {
-            store.ensureAccount(nodeId, { algorithm });
-            const payload = store.exportAccount(nodeId);
+            const payload = {
+                version: 2,
+                exportedAt: new Date().toISOString(),
+                account: {
+                    accountId: wallet.accountId,
+                    publicKeyPem: wallet.publicKeyPem,
+                    balance: ledger.getBalance(wallet.accountId),
+                    nonce: ledger.getNonce(wallet.accountId)
+                }
+            };
             const outPath = getArg(args, '--out');
             if (outPath) {
                 fs.writeFileSync(path.resolve(outPath), JSON.stringify(payload, null, 2));
@@ -452,62 +460,68 @@ async function accountCommand(subcommand, args, configPath = null) {
             return;
         }
         if (subcommand === 'import') {
-            const file = args[0] || getArg(args, '--file');
-            if (!file || !fs.existsSync(file)) {
-                console.error('❌ Please specify account JSON file');
-                return;
-            }
-            const payload = JSON.parse(fs.readFileSync(file, 'utf8'));
-            const account = store.importAccount(nodeId, payload);
-            console.log(JSON.stringify({ success: true, account }, null, 2));
+            console.error('❌ Account import disabled. Private keys never leave the node.');
             return;
         }
         if (subcommand === 'transfer') {
-            const fromAccountIdRaw = getArg(args, '--from-account') || getArg(args, '--from');
             const toAccountIdRaw = getArg(args, '--to-account') || getArg(args, '--to');
-            const fromNodeId = getArg(args, '--from-node');
-            const toNodeId = getArg(args, '--to-node');
             const amount = Number(getArg(args, '--amount'));
-            const operatorAccountId = getArg(args, '--operator-account') || config.genesisOperatorAccountId || null;
-            if ((!toAccountIdRaw && !toNodeId) || !Number.isFinite(amount) || amount <= 0) {
+            const bootstrap = getArg(args, '--bootstrap');
+            const bootstrapNodes = [
+                ...(config.bootstrapNodes || []),
+                ...(bootstrap ? [bootstrap] : [])
+            ];
+            if (!toAccountIdRaw || !Number.isFinite(amount) || amount <= 0) {
                 const missing = [];
-                if (!toAccountIdRaw && !toNodeId) missing.push('--to-account/--to-node');
+                if (!toAccountIdRaw) missing.push('--to-account');
                 if (!Number.isFinite(amount) || amount <= 0) missing.push('--amount');
                 console.error(`❌ Missing required option(s): ${missing.join(', ')}`);
-                console.error('Usage: openclaw-mesh account transfer --to-account <accountId> --amount <number> [--from-account <accountId>] [--from-node <nodeId>] [--to-node <nodeId>]');
+                console.error('Usage: openclaw-mesh account transfer --to-account <accountId> --amount <number> [--bootstrap <host:port>]');
                 return;
             }
-            const resolveAccountId = (rawAccountId, rawNodeId) => {
-                if (rawAccountId && rawAccountId.startsWith('node_')) {
-                    rawNodeId = rawAccountId;
-                    rawAccountId = null;
-                }
-                if (rawAccountId === 'genesis') {
-                    rawNodeId = store.genesisNodeId;
-                    rawAccountId = null;
-                }
-                if (rawNodeId) {
-                    const account = store.getAccountByNodeId(rawNodeId);
-                    if (!account) {
-                        throw new Error(`Account not found for nodeId: ${rawNodeId}`);
-                    }
-                    return account.accountId;
-                }
-                return rawAccountId || null;
-            };
-            const currentAccountId = store.ensureAccount(nodeId).accountId;
-            const fromAccountId = resolveAccountId(fromAccountIdRaw, fromNodeId) || currentAccountId;
-            const toAccountId = resolveAccountId(toAccountIdRaw, toNodeId);
-            if (!toAccountId) {
-                throw new Error('To account not found');
+            if (bootstrapNodes.length === 0) {
+                console.error('❌ Missing bootstrap node. Use --bootstrap <host:port> or set bootstrapNodes in config.');
+                return;
             }
-            const result = store.transfer(fromAccountId, toAccountId, amount, { via: 'cli', operatorAccountId });
-            console.log(JSON.stringify(result, null, 2));
+            const nonce = ledger.getNonce(wallet.accountId) + 1;
+            const payload = {
+                type: 'transfer',
+                from: wallet.accountId,
+                to: toAccountIdRaw,
+                amount: Number(amount),
+                nonce,
+                timestamp: Date.now()
+            };
+            const signature = signPayload(wallet.privateKeyPem, payload);
+            const tx = {
+                ...payload,
+                pubkeyPem: wallet.publicKeyPem,
+                signature,
+                txId: crypto.createHash('sha256').update(JSON.stringify({ ...payload, signature })).digest('hex')
+            };
+            const node = new MeshNode({
+                nodeId: config.nodeId,
+                port: 0,
+                bootstrapNodes
+            });
+            try {
+                await node.init();
+                await new Promise(resolve => setTimeout(resolve, 300));
+                node.broadcastAll({
+                    type: 'tx',
+                    payload: tx,
+                    timestamp: Date.now()
+                });
+                await new Promise(resolve => setTimeout(resolve, 300));
+            } finally {
+                await node.stop();
+            }
+            console.log(JSON.stringify({ submitted: true, txId: tx.txId }, null, 2));
             return;
         }
         console.log('Usage: openclaw-mesh account <export|import|transfer>');
     } finally {
-        await store.close();
+        ledger.close();
     }
 }
 
